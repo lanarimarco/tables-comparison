@@ -15,9 +15,11 @@ import java.math.BigDecimal;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
@@ -35,6 +37,14 @@ public class TableComparator {
 
     private static final Logger log = LoggerFactory.getLogger(TableComparator.class);
     private static final int MAX_ROW_DIFFS = 100;
+
+    // DECIMAL and NUMERIC are interchangeable; compare precision and scale, not the type code
+    private static final Set<Integer> NUMERIC_FAMILY = Set.of(Types.DECIMAL, Types.NUMERIC);
+
+    // All character types are interchangeable; compare length, not the type code
+    private static final Set<Integer> CHARACTER_FAMILY = Set.of(
+            Types.CHAR, Types.VARCHAR, Types.LONGVARCHAR,
+            Types.NCHAR, Types.NVARCHAR, Types.LONGNVARCHAR);
     private List<String> tableSchemas = List.of();  // Cache for table schemas
 
     // -------------------------------------------------------------------------
@@ -202,6 +212,7 @@ public class TableComparator {
                         rs.getString("TYPE_NAME"),
                         rs.getInt("DATA_TYPE"),
                         rs.getInt("COLUMN_SIZE"),
+                        rs.getInt("DECIMAL_DIGITS"),
                         rs.getInt("NULLABLE") != DatabaseMetaData.columnNoNulls));
             }
         }
@@ -230,16 +241,52 @@ public class TableComparator {
                         DifferenceDetail.Category.COLUMN_NAME,
                         "Column at position %d name differs: %s='%s', %s='%s'"
                                 .formatted(i + 1, name1, c1.name(), name2, c2.name())));
-            } else if (c1.jdbcType() != c2.jdbcType()) {
-                diffs.add(new DifferenceDetail(
-                        DifferenceDetail.Category.COLUMN_TYPE,
-                        "Column '%s' type differs: %s=%s(%d), %s=%s(%d)"
-                                .formatted(c1.name(),
-                                        name1, c1.typeName(), c1.jdbcType(),
-                                        name2, c2.typeName(), c2.jdbcType())));
+            } else {
+                diffs.addAll(compareColumnType(c1, c2, name1, name2));
             }
         }
         return diffs;
+    }
+
+    private List<DifferenceDetail> compareColumnType(
+            ColumnMetadata c1, ColumnMetadata c2, String name1, String name2) {
+
+        boolean bothNumeric = NUMERIC_FAMILY.contains(c1.jdbcType()) && NUMERIC_FAMILY.contains(c2.jdbcType());
+        boolean bothCharacter = CHARACTER_FAMILY.contains(c1.jdbcType()) && CHARACTER_FAMILY.contains(c2.jdbcType());
+
+        if (bothNumeric) {
+            if (c1.size() != c2.size() || c1.scale() != c2.scale()) {
+                return List.of(new DifferenceDetail(
+                        DifferenceDetail.Category.COLUMN_TYPE,
+                        "Column '%s' numeric precision/scale differs: %s=%s(%d,%d), %s=%s(%d,%d)"
+                                .formatted(c1.name(),
+                                        name1, c1.typeName(), c1.size(), c1.scale(),
+                                        name2, c2.typeName(), c2.size(), c2.scale())));
+            }
+            return List.of();
+        }
+
+        if (bothCharacter) {
+            if (c1.size() != c2.size()) {
+                return List.of(new DifferenceDetail(
+                        DifferenceDetail.Category.COLUMN_TYPE,
+                        "Column '%s' character length differs: %s=%s(%d), %s=%s(%d)"
+                                .formatted(c1.name(),
+                                        name1, c1.typeName(), c1.size(),
+                                        name2, c2.typeName(), c2.size())));
+            }
+            return List.of();
+        }
+
+        if (c1.jdbcType() != c2.jdbcType()) {
+            return List.of(new DifferenceDetail(
+                    DifferenceDetail.Category.COLUMN_TYPE,
+                    "Column '%s' type differs: %s=%s(%d), %s=%s(%d)"
+                            .formatted(c1.name(),
+                                    name1, c1.typeName(), c1.jdbcType(),
+                                    name2, c2.typeName(), c2.jdbcType())));
+        }
+        return List.of();
     }
 
     // -------------------------------------------------------------------------

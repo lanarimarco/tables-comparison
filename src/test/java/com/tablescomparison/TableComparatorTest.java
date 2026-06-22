@@ -121,6 +121,56 @@ class TableComparatorTest {
                 .contains(DifferenceDetail.Category.COLUMN_TYPE);
     }
 
+    @Test
+    void charVsVarchar_sameLength_notFlagged() throws SQLException {
+        // CHAR and VARCHAR are in the same character family; same length → no diff
+        execute(db1, "CREATE TABLE PRODUCTS (ID INT PRIMARY KEY, CODE CHAR(10))");
+        execute(db2, "CREATE TABLE PRODUCTS (ID INT PRIMARY KEY, CODE VARCHAR(10))");
+
+        var results = new TableComparator().compareAll(List.of("PRODUCTS"), ds1, ds2, "S1", "S2");
+
+        assertThat(results.get(0)).isInstanceOf(TableComparisonResult.Equal.class);
+    }
+
+    @Test
+    void charVsVarchar_differentLength_flaggedAsTypeDiff() throws SQLException {
+        // Same character family, but lengths differ → COLUMN_TYPE diff
+        execute(db1, "CREATE TABLE PRODUCTS (ID INT PRIMARY KEY, CODE CHAR(10))");
+        execute(db2, "CREATE TABLE PRODUCTS (ID INT PRIMARY KEY, CODE VARCHAR(20))");
+
+        var results = new TableComparator().compareAll(List.of("PRODUCTS"), ds1, ds2, "S1", "S2");
+
+        var diff = (TableComparisonResult.Different) results.get(0);
+        assertThat(diff.differences()).hasSize(1);
+        assertThat(diff.differences().get(0).category()).isEqualTo(DifferenceDetail.Category.COLUMN_TYPE);
+        assertThat(diff.differences().get(0).description()).contains("length");
+    }
+
+    @Test
+    void numericSamePrecisionScale_notFlagged() throws SQLException {
+        // DECIMAL and NUMERIC are the same numeric family; same precision/scale → no diff
+        execute(db1, "CREATE TABLE ORDERS (ID INT PRIMARY KEY, AMOUNT DECIMAL(10,2))");
+        execute(db2, "CREATE TABLE ORDERS (ID INT PRIMARY KEY, AMOUNT NUMERIC(10,2))");
+
+        var results = new TableComparator().compareAll(List.of("ORDERS"), ds1, ds2, "S1", "S2");
+
+        assertThat(results.get(0)).isInstanceOf(TableComparisonResult.Equal.class);
+    }
+
+    @Test
+    void numericDifferentScale_flaggedAsTypeDiff() throws SQLException {
+        // Same numeric family, but scales differ → COLUMN_TYPE diff
+        execute(db1, "CREATE TABLE ORDERS (ID INT PRIMARY KEY, AMOUNT DECIMAL(10,2))");
+        execute(db2, "CREATE TABLE ORDERS (ID INT PRIMARY KEY, AMOUNT NUMERIC(10,4))");
+
+        var results = new TableComparator().compareAll(List.of("ORDERS"), ds1, ds2, "S1", "S2");
+
+        var diff = (TableComparisonResult.Different) results.get(0);
+        assertThat(diff.differences()).hasSize(1);
+        assertThat(diff.differences().get(0).category()).isEqualTo(DifferenceDetail.Category.COLUMN_TYPE);
+        assertThat(diff.differences().get(0).description()).contains("precision/scale");
+    }
+
     // -------------------------------------------------------------------------
     // Row data differences
     // -------------------------------------------------------------------------

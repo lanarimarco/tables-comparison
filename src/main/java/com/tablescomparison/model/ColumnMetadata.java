@@ -7,7 +7,8 @@ package com.tablescomparison.model;
  * @param name      column name
  * @param typeName  SQL type name as reported by the driver (e.g. "VARCHAR", "INTEGER")
  * @param jdbcType  JDBC type constant from {@link java.sql.Types}
- * @param size      column size (precision for numerics, length for strings)
+ * @param size      column size (precision for numerics, max length for strings)
+ * @param scale     decimal digits for numeric types, 0 for others
  * @param nullable  true if the column allows NULL values
  */
 public record ColumnMetadata(
@@ -16,5 +17,6 @@ public record ColumnMetadata(
         String typeName,
         int jdbcType,
         int size,
+        int scale,
         boolean nullable) {
 }
