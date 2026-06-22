@@ -36,8 +36,6 @@ import java.util.stream.Collectors;
 public class TableComparator {
 
     private static final Logger log = LoggerFactory.getLogger(TableComparator.class);
-    private static final int MAX_ROW_DIFFS = 100;
-
     // DECIMAL and NUMERIC are interchangeable; compare precision and scale, not the type code
     private static final Set<Integer> NUMERIC_FAMILY = Set.of(Types.DECIMAL, Types.NUMERIC);
 
@@ -109,21 +107,21 @@ public class TableComparator {
                 diffs.add(new DifferenceDetail(
                         DifferenceDetail.Category.RECORD_COUNT,
                         "Record count differs: %s=%d, %s=%d".formatted(name1, count1, name2, count2)));
-                return new TableComparisonResult.Different(tableName, diffs);
+                return new TableComparisonResult.Different(tableName, diffs, null);
             }
 
             // Step 2 — metadata
             log.info("[STEP 2/3] Comparing metadata for table '{}'", tableName);
             var cols1 = getColumnMetadata(tableName, ds1);
             var cols2 = getColumnMetadata(tableName, ds2);
-            log.debug("Metadata retrieved for table '{}': {} columns in {}, {} columns in {}", 
+            log.debug("Metadata retrieved for table '{}': {} columns in {}, {} columns in {}",
                     tableName, cols1.size(), name1, cols2.size(), name2);
             var metaDiffs = compareMetadata(cols1, cols2, name1, name2);
             if (!metaDiffs.isEmpty()) {
                 var firstDiff = metaDiffs.getFirst();
-                log.warn("Metadata differences found for table '{}': {} difference(s) — First: {} : {}", 
+                log.warn("Metadata differences found for table '{}': {} difference(s) — First: {} : {}",
                         tableName, metaDiffs.size(), firstDiff.category(), firstDiff.description());
-                return new TableComparisonResult.Different(tableName, metaDiffs);
+                return new TableComparisonResult.Different(tableName, metaDiffs, null);
             }
             log.debug("Metadata match for table '{}': schema is identical", tableName);
 
@@ -131,18 +129,17 @@ public class TableComparator {
             log.info("[STEP 3/3] Comparing row data for table '{}'", tableName);
             var primaryKeys = getPrimaryKeys(tableName, ds1);
             log.debug("Table '{}': {} primary key column(s): {}", tableName, primaryKeys.size(), primaryKeys);
-            var rowDiffs = compareRecords(tableName, ds1, ds2, primaryKeys, cols1, name1, name2);
-            diffs.addAll(rowDiffs);
-            
-            if (!rowDiffs.isEmpty()) {
-                log.warn("Row data differences found for table '{}': {} difference(s)", tableName, rowDiffs.size());
+            var rowResult = compareRecords(tableName, ds1, ds2, primaryKeys, cols1, name1, name2);
+
+            if (!rowResult.diffs().isEmpty()) {
+                log.warn("Row data differences found for table '{}': {} difference(s)", tableName, rowResult.diffs().size());
             } else {
                 log.debug("Row data match for table '{}': all rows are identical", tableName);
             }
 
-            return diffs.isEmpty()
+            return rowResult.diffs().isEmpty()
                     ? new TableComparisonResult.Equal(tableName, count1)
-                    : new TableComparisonResult.Different(tableName, diffs);
+                    : new TableComparisonResult.Different(tableName, rowResult.diffs(), rowResult.query());
 
         } catch (Exception e) {
             log.error("Error comparing table '{}': {}", tableName, e.getMessage(), e);
@@ -328,12 +325,13 @@ public class TableComparator {
         return pks;
     }
 
-    private List<DifferenceDetail> compareRecords(
+    private record RowCompareResult(String query, List<DifferenceDetail> diffs) {}
+
+    private RowCompareResult compareRecords(
             String tableName, DataSource ds1, DataSource ds2,
             List<String> primaryKeys, List<ColumnMetadata> columns,
             String name1, String name2) throws SQLException {
 
-        var diffs = new ArrayList<DifferenceDetail>();
         String orderBy = buildOrderBy(primaryKeys, columns);
         String query = "SELECT * FROM \"" + tableName.toUpperCase() + "\" ORDER BY " + orderBy;
         log.info("Executing query for table '{}': {}", tableName, query);
@@ -349,45 +347,49 @@ public class TableComparator {
             boolean has2 = rs2.next();
             long rowPosition = 0;
 
-            while ((has1 || has2) && diffs.size() < MAX_ROW_DIFFS) {
+            while (has1 || has2) {
                 rowPosition++;
                 if (!has1) {
-                    diffs.add(new DifferenceDetail(DifferenceDetail.Category.ONLY_IN_SOURCE2,
-                            "%s only — %s".formatted(name2, rowToString(rs2, columns))));
-                    has2 = rs2.next();
+                    return new RowCompareResult(query, List.of(new DifferenceDetail(
+                            DifferenceDetail.Category.ONLY_IN_SOURCE2,
+                            "Row #%d — %s only".formatted(rowPosition, name2))));
                 } else if (!has2) {
-                    diffs.add(new DifferenceDetail(DifferenceDetail.Category.ONLY_IN_SOURCE1,
-                            "%s only — %s".formatted(name1, rowToString(rs1, columns))));
-                    has1 = rs1.next();
+                    return new RowCompareResult(query, List.of(new DifferenceDetail(
+                            DifferenceDetail.Category.ONLY_IN_SOURCE1,
+                            "Row #%d — %s only".formatted(rowPosition, name1))));
                 } else if (!primaryKeys.isEmpty()) {
                     int cmp = comparePrimaryKeys(rs1, rs2, primaryKeys);
                     if (cmp < 0) {
-                        diffs.add(new DifferenceDetail(DifferenceDetail.Category.ONLY_IN_SOURCE1,
-                                "%s only — %s".formatted(name1, rowToString(rs1, columns))));
-                        has1 = rs1.next();
+                        return new RowCompareResult(query, List.of(new DifferenceDetail(
+                                DifferenceDetail.Category.ONLY_IN_SOURCE1,
+                                "Row #%d — %s only".formatted(rowPosition, name1))));
                     } else if (cmp > 0) {
-                        diffs.add(new DifferenceDetail(DifferenceDetail.Category.ONLY_IN_SOURCE2,
-                                "%s only — %s".formatted(name2, rowToString(rs2, columns))));
-                        has2 = rs2.next();
+                        return new RowCompareResult(query, List.of(new DifferenceDetail(
+                                DifferenceDetail.Category.ONLY_IN_SOURCE2,
+                                "Row #%d — %s only".formatted(rowPosition, name2))));
                     } else {
-                        diffs.addAll(compareRow(rs1, rs2, columns, primaryKeys, rowPosition, name1, name2));
+                        if (rowsDiffer(rs1, rs2, columns, primaryKeys)) {
+                            return new RowCompareResult(query, List.of(new DifferenceDetail(
+                                    DifferenceDetail.Category.ROW_DATA_MISMATCH,
+                                    "Row #%d".formatted(rowPosition))));
+                        }
                         has1 = rs1.next();
                         has2 = rs2.next();
                     }
                 } else {
                     // No PK — positional comparison
-                    diffs.addAll(compareRow(rs1, rs2, columns, List.of(), rowPosition, name1, name2));
+                    if (rowsDiffer(rs1, rs2, columns, List.of())) {
+                        return new RowCompareResult(query, List.of(new DifferenceDetail(
+                                DifferenceDetail.Category.ROW_DATA_MISMATCH,
+                                "Row #%d".formatted(rowPosition))));
+                    }
                     has1 = rs1.next();
                     has2 = rs2.next();
                 }
             }
         }
 
-        if (diffs.size() >= MAX_ROW_DIFFS) {
-            diffs.add(new DifferenceDetail(DifferenceDetail.Category.ROW_DATA_MISMATCH,
-                    "Output truncated — more than %d differences found".formatted(MAX_ROW_DIFFS)));
-        }
-        return diffs;
+        return new RowCompareResult(query, List.of());
     }
 
     private String buildOrderBy(List<String> primaryKeys, List<ColumnMetadata> columns) {
@@ -410,52 +412,20 @@ public class TableComparator {
         return 0;
     }
 
-    private List<DifferenceDetail> compareRow(
-            ResultSet rs1, ResultSet rs2,
-            List<ColumnMetadata> columns, List<String> primaryKeys,
-            long rowPosition, String name1, String name2) throws SQLException {
-
-        var diffs = new ArrayList<DifferenceDetail>();
-
-        String pkLabel = primaryKeys.isEmpty() ? "" :
-                primaryKeys.stream()
-                        .map(pk -> {
-                            try { return pk + "=" + rs1.getObject(pk); }
-                            catch (SQLException e) { return pk + "=?"; }
-                        })
-                        .collect(Collectors.joining(", ", "[", "]"));
-
-        for (var col : columns) {
-            if (primaryKeys.contains(col.name())) continue;
-            var v1 = rs1.getObject(col.name());
-            var v2 = rs2.getObject(col.name());
-            if (!Objects.equals(v1, v2)) {
-                diffs.add(new DifferenceDetail(
-                        DifferenceDetail.Category.ROW_DATA_MISMATCH,
-                        "Row #%d %s column '%s': %s='%s', %s='%s'"
-                                .formatted(rowPosition, pkLabel, col.name(), name1, v1, name2, v2)));
-            }
-        }
-        return diffs;
-    }
-
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
-    private String rowToString(ResultSet rs, List<ColumnMetadata> columns) throws SQLException {
-        var sb = new StringBuilder("{");
-        for (int i = 0; i < columns.size(); i++) {
-            if (i > 0) sb.append(", ");
-            sb.append(columns.get(i).name()).append("=");
-            try { sb.append(rs.getObject(columns.get(i).name())); }
-            catch (SQLException e) { sb.append("?"); }
+    private boolean rowsDiffer(ResultSet rs1, ResultSet rs2,
+            List<ColumnMetadata> columns, List<String> primaryKeys) throws SQLException {
+        for (var col : columns) {
+            if (primaryKeys.contains(col.name())) continue;
+            if (!Objects.equals(rs1.getObject(col.name()), rs2.getObject(col.name()))) return true;
         }
-        sb.append("}");
-        return sb.toString();
+        return false;
     }
 
-    @SuppressWarnings({"unchecked", "rawtypes"})
+    @SuppressWarnings("unchecked")
     private int compareValues(Object v1, Object v2) {
         if (v1 == null && v2 == null) return 0;
         if (v1 == null) return -1;

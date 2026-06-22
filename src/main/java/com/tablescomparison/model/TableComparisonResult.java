@@ -25,7 +25,7 @@ public sealed interface TableComparisonResult
     record Equal(String tableName, long recordCount) implements TableComparisonResult {}
 
     /** At least one difference was detected. */
-    record Different(String tableName, List<DifferenceDetail> differences)
+    record Different(String tableName, List<DifferenceDetail> differences, String rowQuery)
             implements TableComparisonResult {
         public Different {
             differences = List.copyOf(differences);

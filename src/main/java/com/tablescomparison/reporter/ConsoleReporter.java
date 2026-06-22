@@ -37,6 +37,9 @@ public class ConsoleReporter implements ComparisonReporter {
                 case TableComparisonResult.Different diff -> {
                     out.println("  Table  : " + diff.tableName());
                     out.println("  Status : ✗ DIFFERENT");
+                    if (diff.rowQuery() != null) {
+                        out.println("  Select : " + diff.rowQuery());
+                    }
                     out.println("  Details:");
                     for (var d : diff.differences()) {
                         out.println("    [%-20s] %s".formatted(d.category(), d.description()));

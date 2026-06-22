@@ -189,7 +189,8 @@ class TableComparatorTest {
         var diff = (TableComparisonResult.Different) results.get(0);
         assertThat(diff.differences().stream().map(DifferenceDetail::category))
                 .contains(DifferenceDetail.Category.ROW_DATA_MISMATCH);
-        assertThat(diff.differences().get(0).description()).contains("NAME");
+        assertThat(diff.differences().get(0).description()).startsWith("Row #");
+        assertThat(diff.rowQuery()).contains("CUSTOMERS");
     }
 
     @Test
