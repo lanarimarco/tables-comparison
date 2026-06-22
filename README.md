@@ -66,6 +66,9 @@ TABLE_NAMES=TABLE1,TABLE2,TABLE3
 
 # Optional: schemas to try as fallback when metadata retrieval fails (comma-separated)
 TABLE_SCHEMAS=SCHEMA1,SCHEMA2
+
+# Optional: maximum rows to scan per table (0 or unset = no limit)
+COMPARE_MAX_ROWS=10000
 ```
 
 **Bundled JDBC drivers:** PostgreSQL (`postgresql 42.7.11`) and IBM AS400/iSeries (`jt400 10.4`) are already included as dependencies. For other databases, add the appropriate driver to `pom.xml`.
@@ -87,7 +90,8 @@ var request = new ComparisonRequest(
     List.of("CUSTOMERS", "ORDERS", "PRODUCTS"),
     source1,
     source2,
-    List.of()   // optional schema fallback list
+    List.of(),  // optional schema fallback list
+    0L          // maxRows: 0 means no limit
 );
 
 var results = new TableComparator().compareAll(request);
