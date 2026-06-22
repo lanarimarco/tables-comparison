@@ -1,0 +1,17 @@
+# Environment variables
+.env
+
+# Maven
+target/
+.m2/
+*.jar
+*.war
+*.ear
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
