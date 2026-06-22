@@ -16,7 +16,8 @@ public class Main {
         var tableNames = ConfigLoader.loadTableNames();
         var tableSchemas = ConfigLoader.loadTableSchemas();
 
-        var request = new ComparisonRequest(tableNames, source1, source2, tableSchemas);
+        var maxRows = ConfigLoader.loadMaxRows();
+        var request = new ComparisonRequest(tableNames, source1, source2, tableSchemas, maxRows);
 
         var results = new TableComparator().compareAll(request);
         new ConsoleReporter().report(results);

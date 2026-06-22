@@ -5,18 +5,20 @@ import java.util.List;
 /**
  * Result of comparing a single table across two datasources.
  *
- * <p>Use pattern matching on this sealed interface to handle all three outcomes:
+ * <p>Use pattern matching on this sealed interface to handle all four outcomes:
  * <pre>{@code
  * switch (result) {
- *     case TableComparisonResult.Equal eq     -> ...
- *     case TableComparisonResult.Different d  -> ...
- *     case TableComparisonResult.Error err    -> ...
+ *     case TableComparisonResult.Equal       eq   -> ...
+ *     case TableComparisonResult.Different   d    -> ...
+ *     case TableComparisonResult.Interrupted i    -> ...
+ *     case TableComparisonResult.Error       err  -> ...
  * }
  * }</pre>
  */
 public sealed interface TableComparisonResult
         permits TableComparisonResult.Equal,
                 TableComparisonResult.Different,
+                TableComparisonResult.Interrupted,
                 TableComparisonResult.Error {
 
     String tableName();
@@ -31,6 +33,10 @@ public sealed interface TableComparisonResult
             differences = List.copyOf(differences);
         }
     }
+
+    /** Row scan was stopped at COMPARE_MAX_ROWS; no difference found within the scanned rows. */
+    record Interrupted(String tableName, long rowsScanned, long maxRows, String rowQuery)
+            implements TableComparisonResult {}
 
     /** The comparison could not be completed due to an exception. */
     record Error(String tableName, String message, Exception cause)

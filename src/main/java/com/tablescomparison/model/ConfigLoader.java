@@ -64,6 +64,14 @@ public class ConfigLoader {
                 .collect(Collectors.toList());
     }
 
+    public static long loadMaxRows() {
+        String value = dotenv.get("COMPARE_MAX_ROWS");
+        if (value == null || value.isBlank()) return 0L;
+        long parsed = Long.parseLong(value.trim());
+        if (parsed < 0) throw new IllegalArgumentException("COMPARE_MAX_ROWS must be >= 0");
+        return parsed;
+    }
+
     private static String getEnv(String key) {
         String value = dotenv.get(key);
         if (value == null || value.isBlank()) {

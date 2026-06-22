@@ -45,6 +45,11 @@ public class ConsoleReporter implements ComparisonReporter {
                         out.println("    [%-20s] %s".formatted(d.category(), d.description()));
                     }
                 }
+                case TableComparisonResult.Interrupted i -> {
+                    out.println("  Table  : " + i.tableName());
+                    out.println("  Status : ⚡ INTERRUPTED (scanned %,d/%,d rows)".formatted(i.rowsScanned(), i.maxRows()));
+                    out.println("  Select : " + i.rowQuery());
+                }
                 case TableComparisonResult.Error err -> {
                     out.println("  Table  : " + err.tableName());
                     out.println("  Status : ⚠ ERROR");
@@ -54,13 +59,14 @@ public class ConsoleReporter implements ComparisonReporter {
             out.println(SEPARATOR);
         }
 
-        long equal   = results.stream().filter(r -> r instanceof TableComparisonResult.Equal).count();
-        long diff    = results.stream().filter(r -> r instanceof TableComparisonResult.Different).count();
-        long errors  = results.stream().filter(r -> r instanceof TableComparisonResult.Error).count();
+        long equal       = results.stream().filter(r -> r instanceof TableComparisonResult.Equal).count();
+        long diff        = results.stream().filter(r -> r instanceof TableComparisonResult.Different).count();
+        long interrupted = results.stream().filter(r -> r instanceof TableComparisonResult.Interrupted).count();
+        long errors      = results.stream().filter(r -> r instanceof TableComparisonResult.Error).count();
 
         out.println();
-        out.println("  Summary: %d table(s) — ✓ %d equal  ✗ %d different  ⚠ %d error(s)"
-                .formatted(results.size(), equal, diff, errors));
+        out.println("  Summary: %d table(s) — ✓ %d equal  ✗ %d different  ⚡ %d interrupted  ⚠ %d error(s)"
+                .formatted(results.size(), equal, diff, interrupted, errors));
         out.println(HEADER);
     }
 }
