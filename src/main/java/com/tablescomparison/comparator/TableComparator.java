@@ -335,7 +335,8 @@ public class TableComparator {
 
         var diffs = new ArrayList<DifferenceDetail>();
         String orderBy = buildOrderBy(primaryKeys, columns);
-        String query = "SELECT * FROM \"" + tableName + "\" ORDER BY " + orderBy;
+        String query = "SELECT * FROM \"" + tableName.toUpperCase() + "\" ORDER BY " + orderBy;
+        log.info("Executing query for table '{}': {}", tableName, query);
 
         try (var conn1 = ds1.getConnection();
              var conn2 = ds2.getConnection();
@@ -346,8 +347,10 @@ public class TableComparator {
 
             boolean has1 = rs1.next();
             boolean has2 = rs2.next();
+            long rowPosition = 0;
 
             while ((has1 || has2) && diffs.size() < MAX_ROW_DIFFS) {
+                rowPosition++;
                 if (!has1) {
                     diffs.add(new DifferenceDetail(DifferenceDetail.Category.ONLY_IN_SOURCE2,
                             "%s only — %s".formatted(name2, rowToString(rs2, columns))));
@@ -367,13 +370,13 @@ public class TableComparator {
                                 "%s only — %s".formatted(name2, rowToString(rs2, columns))));
                         has2 = rs2.next();
                     } else {
-                        diffs.addAll(compareRow(rs1, rs2, columns, primaryKeys, name1, name2));
+                        diffs.addAll(compareRow(rs1, rs2, columns, primaryKeys, rowPosition, name1, name2));
                         has1 = rs1.next();
                         has2 = rs2.next();
                     }
                 } else {
                     // No PK — positional comparison
-                    diffs.addAll(compareRow(rs1, rs2, columns, List.of(), name1, name2));
+                    diffs.addAll(compareRow(rs1, rs2, columns, List.of(), rowPosition, name1, name2));
                     has1 = rs1.next();
                     has2 = rs2.next();
                 }
@@ -389,10 +392,12 @@ public class TableComparator {
 
     private String buildOrderBy(List<String> primaryKeys, List<ColumnMetadata> columns) {
         if (!primaryKeys.isEmpty()) {
-            return String.join(", ", primaryKeys);
+            return primaryKeys.stream()
+                    .map(pk -> "\"" + pk.toUpperCase() + "\"")
+                    .collect(Collectors.joining(", "));
         }
         return columns.stream()
-                .map(ColumnMetadata::name)
+                .map(col -> "\"" + col.name().toUpperCase() + "\"")
                 .collect(Collectors.joining(", "));
     }
 
@@ -408,7 +413,7 @@ public class TableComparator {
     private List<DifferenceDetail> compareRow(
             ResultSet rs1, ResultSet rs2,
             List<ColumnMetadata> columns, List<String> primaryKeys,
-            String name1, String name2) throws SQLException {
+            long rowPosition, String name1, String name2) throws SQLException {
 
         var diffs = new ArrayList<DifferenceDetail>();
 
@@ -427,8 +432,8 @@ public class TableComparator {
             if (!Objects.equals(v1, v2)) {
                 diffs.add(new DifferenceDetail(
                         DifferenceDetail.Category.ROW_DATA_MISMATCH,
-                        "Row %s column '%s': %s='%s', %s='%s'"
-                                .formatted(pkLabel, col.name(), name1, v1, name2, v2)));
+                        "Row #%d %s column '%s': %s='%s', %s='%s'"
+                                .formatted(rowPosition, pkLabel, col.name(), name1, v1, name2, v2)));
             }
         }
         return diffs;
