@@ -387,20 +387,22 @@ public class TableComparator {
                                 DifferenceDetail.Category.ONLY_IN_SOURCE2,
                                 "Row #%d — %s only".formatted(rowPosition, name2))));
                     } else {
-                        if (rowsDiffer(rs1, rs2, columns, primaryKeys)) {
+                        String mismatch = firstMismatchField(rs1, rs2, columns, primaryKeys);
+                        if (mismatch != null) {
                             return RowCompareResult.ok(query, List.of(new DifferenceDetail(
                                     DifferenceDetail.Category.ROW_DATA_MISMATCH,
-                                    "Row #%d".formatted(rowPosition))));
+                                    "Row #%d%s".formatted(rowPosition, mismatch))));
                         }
                         has1 = rs1.next();
                         has2 = rs2.next();
                     }
                 } else {
                     // No PK — positional comparison
-                    if (rowsDiffer(rs1, rs2, columns, List.of())) {
+                    String mismatch = firstMismatchField(rs1, rs2, columns, List.of());
+                    if (mismatch != null) {
                         return RowCompareResult.ok(query, List.of(new DifferenceDetail(
                                 DifferenceDetail.Category.ROW_DATA_MISMATCH,
-                                "Row #%d".formatted(rowPosition))));
+                                "Row #%d%s".formatted(rowPosition, mismatch))));
                     }
                     has1 = rs1.next();
                     has2 = rs2.next();
@@ -435,13 +437,21 @@ public class TableComparator {
     // Helpers
     // -------------------------------------------------------------------------
 
-    private boolean rowsDiffer(ResultSet rs1, ResultSet rs2,
+    /**
+     * Returns a formatted string describing the first column that differs between the two rows,
+     * or {@code null} if all non-PK columns are equal.
+     */
+    private String firstMismatchField(ResultSet rs1, ResultSet rs2,
             List<ColumnMetadata> columns, List<String> primaryKeys) throws SQLException {
         for (var col : columns) {
             if (primaryKeys.contains(col.name())) continue;
-            if (!Objects.equals(rs1.getObject(col.name()), rs2.getObject(col.name()))) return true;
+            Object v1 = rs1.getObject(col.name());
+            Object v2 = rs2.getObject(col.name());
+            if (!Objects.equals(v1, v2)) {
+                return " — '%s': src1=%s, src2=%s".formatted(col.name(), v1, v2);
+            }
         }
-        return false;
+        return null;
     }
 
     @SuppressWarnings("unchecked")
