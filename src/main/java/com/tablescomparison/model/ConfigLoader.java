@@ -80,6 +80,14 @@ public class ConfigLoader {
         return parsed;
     }
 
+    public static int loadFetchSize() {
+        String value = dotenv.get("COMPARE_FETCH_SIZE");
+        if (value == null || value.isBlank()) return 1000;
+        int parsed = Integer.parseInt(value.trim());
+        if (parsed < 1) throw new IllegalArgumentException("COMPARE_FETCH_SIZE must be >= 1");
+        return parsed;
+    }
+
     private static String getEnv(String key) {
         String value = dotenv.get(key);
         if (value == null || value.isBlank()) {

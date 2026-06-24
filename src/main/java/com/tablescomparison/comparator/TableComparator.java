@@ -63,7 +63,7 @@ public class TableComparator {
             return runParallel(
                     request.tables(), ds1, ds2,
                     request.source1().name(), request.source2().name(),
-                    request.tableSchemas(), request.maxRows(), poolSize);
+                    request.tableSchemas(), request.maxRows(), poolSize, request.fetchSize());
         }
     }
 
@@ -83,18 +83,18 @@ public class TableComparator {
     public List<TableComparisonResult> compareAll(
             List<String> tables, DataSource ds1, DataSource ds2,
             String name1, String name2, List<String> tableSchemas) {
-        return runParallel(tables, ds1, ds2, name1, name2, tableSchemas, 0L, 1);
+        return runParallel(tables, ds1, ds2, name1, name2, tableSchemas, 0L, 1, 1000);
     }
 
     private List<TableComparisonResult> runParallel(
             List<String> tables, DataSource ds1, DataSource ds2,
-            String name1, String name2, List<String> tableSchemas, long maxRows, int threadPoolSize) {
+            String name1, String name2, List<String> tableSchemas, long maxRows, int threadPoolSize, int fetchSize) {
 
         var executor = Executors.newFixedThreadPool(threadPoolSize);
         var futures = new ArrayList<Future<TableComparisonResult>>(tables.size());
         for (String table : tables) {
             futures.add(executor.submit(
-                    () -> compare(table, ds1, ds2, name1, name2, tableSchemas, maxRows)));
+                    () -> compare(table, ds1, ds2, name1, name2, tableSchemas, maxRows, fetchSize)));
         }
         executor.shutdown();
 
@@ -118,7 +118,7 @@ public class TableComparator {
 
     private TableComparisonResult compare(
             String tableName, DataSource ds1, DataSource ds2,
-            String name1, String name2, List<String> tableSchemas, long maxRows) {
+            String name1, String name2, List<String> tableSchemas, long maxRows, int fetchSize) {
 
         var thread = Thread.currentThread();
         var previousName = thread.getName();
@@ -159,7 +159,7 @@ public class TableComparator {
             log.info("[STEP 3/3] Comparing row data for table '{}'", tableName);
             var primaryKeys = getPrimaryKeys(tableName, ds1, tableSchemas);
             log.debug("Table '{}': {} primary key column(s): {}", tableName, primaryKeys.size(), primaryKeys);
-            var rowResult = compareRecords(tableName, ds1, ds2, primaryKeys, cols1, name1, name2, count1, maxRows);
+            var rowResult = compareRecords(tableName, ds1, ds2, primaryKeys, cols1, name1, name2, count1, maxRows, fetchSize);
 
             if (rowResult.interrupted()) {
                 return new TableComparisonResult.Interrupted(tableName, maxRows, maxRows, rowResult.query());
@@ -371,7 +371,7 @@ public class TableComparator {
     private RowCompareResult compareRecords(
             String tableName, DataSource ds1, DataSource ds2,
             List<String> primaryKeys, List<ColumnMetadata> columns,
-            String name1, String name2, long totalCount, long maxRows) throws SQLException {
+            String name1, String name2, long totalCount, long maxRows, int fetchSize) throws SQLException {
 
         String orderBy = buildOrderBy(primaryKeys, columns);
         String query = "SELECT * FROM \"" + tableName.toUpperCase() + "\" ORDER BY " + orderBy;
@@ -380,46 +380,61 @@ public class TableComparator {
         try (var conn1 = ds1.getConnection();
              var conn2 = ds2.getConnection();
              var stmt1 = conn1.createStatement();
-             var stmt2 = conn2.createStatement();
-             var rs1 = stmt1.executeQuery(query);
-             var rs2 = stmt2.executeQuery(query)) {
+             var stmt2 = conn2.createStatement()) {
 
-            boolean has1 = rs1.next();
-            boolean has2 = rs2.next();
-            long rowPosition = 0;
-            long logStep = 1000L;
+            stmt1.setFetchSize(fetchSize);
+            stmt2.setFetchSize(fetchSize);
 
-            while (has1 || has2) {
-                rowPosition++;
-                if (maxRows > 0 && rowPosition > maxRows) {
-                    log.warn("Table '{}': row scan interrupted at {} rows (COMPARE_MAX_ROWS={})",
-                            tableName, maxRows, maxRows);
-                    return RowCompareResult.interrupted(query);
-                }
-                if (totalCount > 0 && rowPosition % logStep == 0) {
-                    log.info("Table '{}': {}% ({}/{} rows)", tableName,
-                            rowPosition * 100 / totalCount, rowPosition, totalCount);
-                }
-                if (!has1) {
-                    return RowCompareResult.ok(query, List.of(new DifferenceDetail(
-                            DifferenceDetail.Category.ONLY_IN_SOURCE2,
-                            "Row #%d — %s only".formatted(rowPosition, name2))));
-                } else if (!has2) {
-                    return RowCompareResult.ok(query, List.of(new DifferenceDetail(
-                            DifferenceDetail.Category.ONLY_IN_SOURCE1,
-                            "Row #%d — %s only".formatted(rowPosition, name1))));
-                } else if (!primaryKeys.isEmpty()) {
-                    int cmp = comparePrimaryKeys(rs1, rs2, primaryKeys);
-                    if (cmp < 0) {
-                        return RowCompareResult.ok(query, List.of(new DifferenceDetail(
-                                DifferenceDetail.Category.ONLY_IN_SOURCE1,
-                                "Row #%d — %s only".formatted(rowPosition, name1))));
-                    } else if (cmp > 0) {
+            try (var rs1 = stmt1.executeQuery(query);
+                 var rs2 = stmt2.executeQuery(query)) {
+
+                boolean has1 = rs1.next();
+                boolean has2 = rs2.next();
+                long rowPosition = 0;
+                long logStep = 1000L;
+
+                while (has1 || has2) {
+                    rowPosition++;
+                    if (maxRows > 0 && rowPosition > maxRows) {
+                        log.warn("Table '{}': row scan interrupted at {} rows (COMPARE_MAX_ROWS={})",
+                                tableName, maxRows, maxRows);
+                        return RowCompareResult.interrupted(query);
+                    }
+                    if (totalCount > 0 && rowPosition % logStep == 0) {
+                        log.info("Table '{}': {}% ({}/{} rows)", tableName,
+                                rowPosition * 100 / totalCount, rowPosition, totalCount);
+                    }
+                    if (!has1) {
                         return RowCompareResult.ok(query, List.of(new DifferenceDetail(
                                 DifferenceDetail.Category.ONLY_IN_SOURCE2,
                                 "Row #%d — %s only".formatted(rowPosition, name2))));
+                    } else if (!has2) {
+                        return RowCompareResult.ok(query, List.of(new DifferenceDetail(
+                                DifferenceDetail.Category.ONLY_IN_SOURCE1,
+                                "Row #%d — %s only".formatted(rowPosition, name1))));
+                    } else if (!primaryKeys.isEmpty()) {
+                        int cmp = comparePrimaryKeys(rs1, rs2, primaryKeys);
+                        if (cmp < 0) {
+                            return RowCompareResult.ok(query, List.of(new DifferenceDetail(
+                                    DifferenceDetail.Category.ONLY_IN_SOURCE1,
+                                    "Row #%d — %s only".formatted(rowPosition, name1))));
+                        } else if (cmp > 0) {
+                            return RowCompareResult.ok(query, List.of(new DifferenceDetail(
+                                    DifferenceDetail.Category.ONLY_IN_SOURCE2,
+                                    "Row #%d — %s only".formatted(rowPosition, name2))));
+                        } else {
+                            String mismatch = firstMismatchField(rs1, rs2, columns, primaryKeys);
+                            if (mismatch != null) {
+                                return RowCompareResult.ok(query, List.of(new DifferenceDetail(
+                                        DifferenceDetail.Category.ROW_DATA_MISMATCH,
+                                        "Row #%d%s".formatted(rowPosition, mismatch))));
+                            }
+                            has1 = rs1.next();
+                            has2 = rs2.next();
+                        }
                     } else {
-                        String mismatch = firstMismatchField(rs1, rs2, columns, primaryKeys);
+                        // No PK — positional comparison
+                        String mismatch = firstMismatchField(rs1, rs2, columns, List.of());
                         if (mismatch != null) {
                             return RowCompareResult.ok(query, List.of(new DifferenceDetail(
                                     DifferenceDetail.Category.ROW_DATA_MISMATCH,
@@ -428,16 +443,6 @@ public class TableComparator {
                         has1 = rs1.next();
                         has2 = rs2.next();
                     }
-                } else {
-                    // No PK — positional comparison
-                    String mismatch = firstMismatchField(rs1, rs2, columns, List.of());
-                    if (mismatch != null) {
-                        return RowCompareResult.ok(query, List.of(new DifferenceDetail(
-                                DifferenceDetail.Category.ROW_DATA_MISMATCH,
-                                "Row #%d%s".formatted(rowPosition, mismatch))));
-                    }
-                    has1 = rs1.next();
-                    has2 = rs2.next();
                 }
             }
         }
