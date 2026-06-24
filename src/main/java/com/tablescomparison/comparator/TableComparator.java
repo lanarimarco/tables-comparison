@@ -32,7 +32,7 @@ import java.util.stream.Collectors;
  *   <li>Record count — if counts differ the table is immediately flagged as different.</li>
  *   <li>Metadata — column count, names, and JDBC types are compared; a mismatch stops further
  *       analysis for that table.</li>
- *   <li>Row data — rows are fetched ordered by primary key (or all columns when no PK exists)
+ *   <li>Row data — rows are fetched ordered by unique index columns (or all columns when none exist)
  *       and compared with a merge-join algorithm.</li>
  * </ol>
  */
@@ -157,9 +157,9 @@ public class TableComparator {
 
             // Step 3 — row data
             log.info("[STEP 3/3] Comparing row data for table '{}'", tableName);
-            var primaryKeys = getPrimaryKeys(tableName, ds1, tableSchemas);
-            log.debug("Table '{}': {} primary key column(s): {}", tableName, primaryKeys.size(), primaryKeys);
-            var rowResult = compareRecords(tableName, ds1, ds2, primaryKeys, cols1, name1, name2, count1, maxRows, fetchSize);
+            var keyColumns = getUniqueIndexColumns(tableName, ds1, tableSchemas);
+            log.debug("Table '{}': {} unique index column(s): {}", tableName, keyColumns.size(), keyColumns);
+            var rowResult = compareRecords(tableName, ds1, ds2, keyColumns, cols1, name1, name2, count1, maxRows, fetchSize);
 
             if (rowResult.interrupted()) {
                 return new TableComparisonResult.Interrupted(tableName, maxRows, maxRows, rowResult.query());
@@ -323,40 +323,41 @@ public class TableComparator {
     // Step 3 — row data
     // -------------------------------------------------------------------------
 
-    private List<String> getPrimaryKeys(String tableName, DataSource ds, List<String> tableSchemas)
+    private List<String> getUniqueIndexColumns(String tableName, DataSource ds, List<String> tableSchemas)
             throws SQLException {
         try (var conn = ds.getConnection()) {
             var dbMeta = conn.getMetaData();
-            var pks = readPrimaryKeys(dbMeta, tableName, null);
-            if (pks.isEmpty()) {
-                pks = readPrimaryKeys(dbMeta, tableName.toUpperCase(), null);
+
+            for (String schema : tableSchemas) {
+                log.debug("Attempting to retrieve unique index columns for table '{}' with schema '{}'", tableName, schema);
+                var keys = readUniqueIndexColumns(dbMeta, tableName, schema);
+                if (!keys.isEmpty()) return new ArrayList<>(keys.values());
+                keys = readUniqueIndexColumns(dbMeta, tableName.toUpperCase(), schema);
+                if (!keys.isEmpty()) return new ArrayList<>(keys.values());
             }
-            if (pks.isEmpty()) {
-                // Try with each configured schema as fallback
-                for (String schema : tableSchemas) {
-                    log.debug("Attempting to retrieve primary keys for table '{}' with schema '{}'", tableName, schema);
-                    pks = readPrimaryKeys(dbMeta, tableName, schema);
-                    if (pks.isEmpty()) {
-                        pks = readPrimaryKeys(dbMeta, tableName.toUpperCase(), schema);
-                    }
-                    if (!pks.isEmpty()) {
-                        break;
-                    }
-                }
+
+            // Fallback: try without schema if no schemas are configured or all schema attempts failed
+            var keys = readUniqueIndexColumns(dbMeta, tableName, null);
+            if (keys.isEmpty()) {
+                keys = readUniqueIndexColumns(dbMeta, tableName.toUpperCase(), null);
             }
-            return new ArrayList<>(pks.values());
+            return new ArrayList<>(keys.values());
         }
     }
 
-    private TreeMap<Integer, String> readPrimaryKeys(DatabaseMetaData dbMeta, String tableName, String schema)
+    private TreeMap<Integer, String> readUniqueIndexColumns(DatabaseMetaData dbMeta, String tableName, String schema)
             throws SQLException {
-        var pks = new TreeMap<Integer, String>();
-        try (var rs = dbMeta.getPrimaryKeys(null, schema, tableName)) {
+        var byIndex = new TreeMap<String, TreeMap<Integer, String>>();
+        try (var rs = dbMeta.getIndexInfo(null, schema, tableName, true, false)) {
             while (rs.next()) {
-                pks.put(rs.getInt("KEY_SEQ"), rs.getString("COLUMN_NAME"));
+                if (rs.getShort("TYPE") == DatabaseMetaData.tableIndexStatistic) continue;
+                String indexName = rs.getString("INDEX_NAME");
+                if (indexName == null) continue;
+                byIndex.computeIfAbsent(indexName, k -> new TreeMap<>())
+                       .put(rs.getInt("ORDINAL_POSITION"), rs.getString("COLUMN_NAME"));
             }
         }
-        return pks;
+        return byIndex.isEmpty() ? new TreeMap<>() : byIndex.firstEntry().getValue();
     }
 
     private record RowCompareResult(String query, List<DifferenceDetail> diffs, boolean interrupted) {
@@ -370,10 +371,10 @@ public class TableComparator {
 
     private RowCompareResult compareRecords(
             String tableName, DataSource ds1, DataSource ds2,
-            List<String> primaryKeys, List<ColumnMetadata> columns,
+            List<String> keyColumns, List<ColumnMetadata> columns,
             String name1, String name2, long totalCount, long maxRows, int fetchSize) throws SQLException {
 
-        String orderBy = buildOrderBy(primaryKeys, columns);
+        String orderBy = buildOrderBy(keyColumns, columns);
         String query = "SELECT * FROM \"" + tableName.toUpperCase() + "\" ORDER BY " + orderBy;
         log.info("Executing query for table '{}': {}", tableName, query);
 
@@ -412,8 +413,8 @@ public class TableComparator {
                         return RowCompareResult.ok(query, List.of(new DifferenceDetail(
                                 DifferenceDetail.Category.ONLY_IN_SOURCE1,
                                 "Row #%d — %s only".formatted(rowPosition, name1))));
-                    } else if (!primaryKeys.isEmpty()) {
-                        int cmp = comparePrimaryKeys(rs1, rs2, primaryKeys);
+                    } else if (!keyColumns.isEmpty()) {
+                        int cmp = compareKeyColumns(rs1, rs2, keyColumns);
                         if (cmp < 0) {
                             return RowCompareResult.ok(query, List.of(new DifferenceDetail(
                                     DifferenceDetail.Category.ONLY_IN_SOURCE1,
@@ -423,7 +424,7 @@ public class TableComparator {
                                     DifferenceDetail.Category.ONLY_IN_SOURCE2,
                                     "Row #%d — %s only".formatted(rowPosition, name2))));
                         } else {
-                            String mismatch = firstMismatchField(rs1, rs2, columns, primaryKeys);
+                            String mismatch = firstMismatchField(rs1, rs2, columns, keyColumns);
                             if (mismatch != null) {
                                 return RowCompareResult.ok(query, List.of(new DifferenceDetail(
                                         DifferenceDetail.Category.ROW_DATA_MISMATCH,
@@ -433,7 +434,7 @@ public class TableComparator {
                             has2 = rs2.next();
                         }
                     } else {
-                        // No PK — positional comparison
+                        // No unique index — positional comparison
                         String mismatch = firstMismatchField(rs1, rs2, columns, List.of());
                         if (mismatch != null) {
                             return RowCompareResult.ok(query, List.of(new DifferenceDetail(
@@ -450,10 +451,10 @@ public class TableComparator {
         return RowCompareResult.ok(query, List.of());
     }
 
-    private String buildOrderBy(List<String> primaryKeys, List<ColumnMetadata> columns) {
-        if (!primaryKeys.isEmpty()) {
-            return primaryKeys.stream()
-                    .map(pk -> "\"" + pk.toUpperCase() + "\"")
+    private String buildOrderBy(List<String> keyColumns, List<ColumnMetadata> columns) {
+        if (!keyColumns.isEmpty()) {
+            return keyColumns.stream()
+                    .map(col -> "\"" + col.toUpperCase() + "\"")
                     .collect(Collectors.joining(", "));
         }
         return columns.stream()
@@ -461,10 +462,10 @@ public class TableComparator {
                 .collect(Collectors.joining(", "));
     }
 
-    private int comparePrimaryKeys(ResultSet rs1, ResultSet rs2, List<String> pks)
+    private int compareKeyColumns(ResultSet rs1, ResultSet rs2, List<String> keyColumns)
             throws SQLException {
-        for (String pk : pks) {
-            int cmp = compareValues(rs1.getObject(pk), rs2.getObject(pk));
+        for (String col : keyColumns) {
+            int cmp = compareValues(rs1.getObject(col), rs2.getObject(col));
             if (cmp != 0) return cmp;
         }
         return 0;
@@ -476,12 +477,12 @@ public class TableComparator {
 
     /**
      * Returns a formatted string describing the first column that differs between the two rows,
-     * or {@code null} if all non-PK columns are equal.
+     * or {@code null} if all non-key columns are equal.
      */
     private String firstMismatchField(ResultSet rs1, ResultSet rs2,
-            List<ColumnMetadata> columns, List<String> primaryKeys) throws SQLException {
+            List<ColumnMetadata> columns, List<String> keyColumns) throws SQLException {
         for (var col : columns) {
-            if (primaryKeys.contains(col.name())) continue;
+            if (keyColumns.contains(col.name())) continue;
             Object v1 = rs1.getObject(col.name());
             Object v2 = rs2.getObject(col.name());
             if (!Objects.equals(v1, v2)) {
