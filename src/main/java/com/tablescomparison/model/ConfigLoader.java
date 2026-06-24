@@ -88,6 +88,14 @@ public class ConfigLoader {
         return parsed;
     }
 
+    public static int loadQueryTimeoutSeconds() {
+        String value = dotenv.get("COMPARE_QUERY_TIMEOUT_SECONDS");
+        if (value == null || value.isBlank()) return 0;
+        int parsed = Integer.parseInt(value.trim());
+        if (parsed < 0) throw new IllegalArgumentException("COMPARE_QUERY_TIMEOUT_SECONDS must be >= 0");
+        return parsed;
+    }
+
     private static String getEnv(String key) {
         String value = dotenv.get(key);
         if (value == null || value.isBlank()) {

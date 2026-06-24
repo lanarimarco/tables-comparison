@@ -12,6 +12,7 @@ import java.util.List;
  * @param maxRows maximum rows to scan per table; 0 means no limit
  * @param threadPoolSize number of tables compared in parallel
  * @param fetchSize number of rows fetched per round-trip to the database
+ * @param queryTimeoutSeconds JDBC query timeout in seconds; 0 means no timeout
  */
 public record ComparisonRequest(
         List<String> tables,
@@ -20,7 +21,8 @@ public record ComparisonRequest(
         List<String> tableSchemas,
         long maxRows,
         int threadPoolSize,
-        int fetchSize) {
+        int fetchSize,
+        int queryTimeoutSeconds) {
 
     public ComparisonRequest {
         if (tables == null || tables.isEmpty()) throw new IllegalArgumentException("tables must not be empty");
@@ -30,6 +32,7 @@ public record ComparisonRequest(
         if (maxRows < 0) throw new IllegalArgumentException("maxRows must be >= 0");
         if (threadPoolSize < 1) throw new IllegalArgumentException("threadPoolSize must be >= 1");
         if (fetchSize < 1) throw new IllegalArgumentException("fetchSize must be >= 1");
+        if (queryTimeoutSeconds < 0) throw new IllegalArgumentException("queryTimeoutSeconds must be >= 0");
         tables = List.copyOf(tables);
         tableSchemas = List.copyOf(tableSchemas);
     }

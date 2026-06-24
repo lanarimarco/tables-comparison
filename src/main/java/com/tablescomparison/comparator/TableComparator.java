@@ -63,7 +63,8 @@ public class TableComparator {
             return runParallel(
                     request.tables(), ds1, ds2,
                     request.source1().name(), request.source2().name(),
-                    request.tableSchemas(), request.maxRows(), poolSize, request.fetchSize());
+                    request.tableSchemas(), request.maxRows(), poolSize, request.fetchSize(),
+                    request.queryTimeoutSeconds());
         }
     }
 
@@ -83,18 +84,19 @@ public class TableComparator {
     public List<TableComparisonResult> compareAll(
             List<String> tables, DataSource ds1, DataSource ds2,
             String name1, String name2, List<String> tableSchemas) {
-        return runParallel(tables, ds1, ds2, name1, name2, tableSchemas, 0L, 1, 1000);
+        return runParallel(tables, ds1, ds2, name1, name2, tableSchemas, 0L, 1, 1000, 0);
     }
 
     private List<TableComparisonResult> runParallel(
             List<String> tables, DataSource ds1, DataSource ds2,
-            String name1, String name2, List<String> tableSchemas, long maxRows, int threadPoolSize, int fetchSize) {
+            String name1, String name2, List<String> tableSchemas, long maxRows, int threadPoolSize, int fetchSize,
+            int queryTimeoutSeconds) {
 
         var executor = Executors.newFixedThreadPool(threadPoolSize);
         var futures = new ArrayList<Future<TableComparisonResult>>(tables.size());
         for (String table : tables) {
             futures.add(executor.submit(
-                    () -> compare(table, ds1, ds2, name1, name2, tableSchemas, maxRows, fetchSize)));
+                    () -> compare(table, ds1, ds2, name1, name2, tableSchemas, maxRows, fetchSize, queryTimeoutSeconds)));
         }
         executor.shutdown();
 
@@ -118,7 +120,8 @@ public class TableComparator {
 
     private TableComparisonResult compare(
             String tableName, DataSource ds1, DataSource ds2,
-            String name1, String name2, List<String> tableSchemas, long maxRows, int fetchSize) {
+            String name1, String name2, List<String> tableSchemas, long maxRows, int fetchSize,
+            int queryTimeoutSeconds) {
 
         var thread = Thread.currentThread();
         var previousName = thread.getName();
@@ -129,8 +132,8 @@ public class TableComparator {
 
             // Step 1 — record count
             log.info("[STEP 1/3] Comparing record counts for table '{}'", tableName);
-            long count1 = getRecordCount(tableName, ds1);
-            long count2 = getRecordCount(tableName, ds2);
+            long count1 = getRecordCount(tableName, ds1, queryTimeoutSeconds);
+            long count2 = getRecordCount(tableName, ds2, queryTimeoutSeconds);
             log.info("Record counts for table '{}': {} = {}, {} = {}", tableName, name1, count1, name2, count2);
             if (count1 != count2) {
                 log.warn("Record count mismatch for table '{}': {} = {}, {} = {}", tableName, name1, count1, name2, count2);
@@ -159,7 +162,7 @@ public class TableComparator {
             log.info("[STEP 3/3] Comparing row data for table '{}'", tableName);
             var keyColumns = getUniqueIndexColumns(tableName, ds1, tableSchemas);
             log.debug("Table '{}': {} unique index column(s): {}", tableName, keyColumns.size(), keyColumns);
-            var rowResult = compareRecords(tableName, ds1, ds2, keyColumns, cols1, name1, name2, count1, maxRows, fetchSize);
+            var rowResult = compareRecords(tableName, ds1, ds2, keyColumns, cols1, name1, name2, count1, maxRows, fetchSize, queryTimeoutSeconds);
 
             if (rowResult.interrupted()) {
                 return new TableComparisonResult.Interrupted(tableName, maxRows, maxRows, rowResult.query());
@@ -183,12 +186,14 @@ public class TableComparator {
     // Step 1 — record count
     // -------------------------------------------------------------------------
 
-    private long getRecordCount(String tableName, DataSource ds) throws SQLException {
+    private long getRecordCount(String tableName, DataSource ds, int queryTimeoutSeconds) throws SQLException {
         try (var conn = ds.getConnection();
-             var stmt = conn.createStatement();
-             var rs = stmt.executeQuery("SELECT COUNT(*) FROM " + "\"" + tableName + "\"")) {
-            rs.next();
-            return rs.getLong(1);
+             var stmt = conn.createStatement()) {
+            if (queryTimeoutSeconds > 0) stmt.setQueryTimeout(queryTimeoutSeconds);
+            try (var rs = stmt.executeQuery("SELECT COUNT(*) FROM " + "\"" + tableName + "\"")) {
+                rs.next();
+                return rs.getLong(1);
+            }
         }
     }
 
@@ -372,7 +377,8 @@ public class TableComparator {
     private RowCompareResult compareRecords(
             String tableName, DataSource ds1, DataSource ds2,
             List<String> keyColumns, List<ColumnMetadata> columns,
-            String name1, String name2, long totalCount, long maxRows, int fetchSize) throws SQLException {
+            String name1, String name2, long totalCount, long maxRows, int fetchSize,
+            int queryTimeoutSeconds) throws SQLException {
 
         String orderBy = buildOrderBy(keyColumns, columns);
         String query = "SELECT * FROM \"" + tableName.toUpperCase() + "\" ORDER BY " + orderBy;
@@ -385,6 +391,10 @@ public class TableComparator {
 
             stmt1.setFetchSize(fetchSize);
             stmt2.setFetchSize(fetchSize);
+            if (queryTimeoutSeconds > 0) {
+                stmt1.setQueryTimeout(queryTimeoutSeconds);
+                stmt2.setQueryTimeout(queryTimeoutSeconds);
+            }
 
             try (var rs1 = stmt1.executeQuery(query);
                  var rs2 = stmt2.executeQuery(query)) {
