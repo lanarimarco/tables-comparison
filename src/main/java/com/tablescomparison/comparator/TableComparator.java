@@ -134,7 +134,7 @@ public class TableComparator {
             log.info("[STEP 1/3] Comparing record counts for table '{}'", tableName);
             long count1 = getRecordCount(tableName, ds1, queryTimeoutSeconds);
             long count2 = getRecordCount(tableName, ds2, queryTimeoutSeconds);
-            log.info("Record counts for table '{}': {} = {}, {} = {}", tableName, name1, count1, name2, count2);
+            log.debug("Record counts for table '{}': {} = {}, {} = {}", tableName, name1, count1, name2, count2);
             if (count1 != count2) {
                 log.warn("Record count mismatch for table '{}': {} = {}, {} = {}", tableName, name1, count1, name2, count2);
                 diffs.add(new DifferenceDetail(
@@ -382,7 +382,7 @@ public class TableComparator {
 
         String orderBy = buildOrderBy(keyColumns, columns);
         String query = "SELECT * FROM \"" + tableName.toUpperCase() + "\" ORDER BY " + orderBy;
-        log.info("Executing query for table '{}': {}", tableName, query);
+        log.debug("Executing query for table '{}': {}", tableName, query);
 
         try (var conn1 = ds1.getConnection();
              var conn2 = ds2.getConnection()) {
