@@ -497,7 +497,13 @@ public class TableComparator {
         var sb = new StringBuilder("[");
         for (int i = 0; i < keyColumns.size(); i++) {
             if (i > 0) sb.append(", ");
-            sb.append(keyColumns.get(i)).append('=').append(rs.getObject(keyColumns.get(i)));
+            Object val = rs.getObject(keyColumns.get(i));
+            sb.append(keyColumns.get(i)).append('=');
+            if (val instanceof String) {
+                sb.append('\'').append(val).append('\'');
+            } else {
+                sb.append(val);
+            }
         }
         sb.append(']');
         return sb.toString();
