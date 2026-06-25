@@ -58,6 +58,7 @@ public class TableComparator {
      * DataSources are created from the supplied configs and closed when done.
      */
     public List<TableComparisonResult> compareAll(ComparisonRequest request) {
+        logConfig(request);
         int poolSize = request.threadPoolSize();
         try (var ds1 = createDataSource(request.source1(), poolSize);
              var ds2 = createDataSource(request.source2(), poolSize)) {
@@ -655,6 +656,27 @@ public class TableComparator {
             catch (ClassCastException ignored) { /* fall through */ }
         }
         return v1.toString().compareTo(v2.toString());
+    }
+
+    private void logConfig(ComparisonRequest req) {
+        var s1 = req.source1();
+        var s2 = req.source2();
+        log.info("=== Comparison configuration ===");
+        log.info("  Source 1 : {}", s1.name());
+        log.info("    URL    : {}", s1.jdbcUrl());
+        log.info("    User   : {}", s1.username());
+        if (s1.driverClassName() != null) log.info("    Driver : {}", s1.driverClassName());
+        log.info("  Source 2 : {}", s2.name());
+        log.info("    URL    : {}", s2.jdbcUrl());
+        log.info("    User   : {}", s2.username());
+        if (s2.driverClassName() != null) log.info("    Driver : {}", s2.driverClassName());
+        log.info("  Tables   : {}", String.join(", ", req.tables()));
+        if (!req.tableSchemas().isEmpty()) log.info("  Schemas  : {}", String.join(", ", req.tableSchemas()));
+        log.info("  Max rows : {}", req.maxRows() == 0 ? "unlimited" : "%,d".formatted(req.maxRows()));
+        log.info("  Threads  : {}", req.threadPoolSize());
+        log.info("  Fetch sz : {}", req.fetchSize());
+        log.info("  Timeout  : {}", req.queryTimeoutSeconds() == 0 ? "none" : req.queryTimeoutSeconds() + "s");
+        log.info("================================");
     }
 
     private HikariDataSource createDataSource(DataSourceConfig config, int threadPoolSize) {
