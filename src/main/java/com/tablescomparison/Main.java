@@ -23,6 +23,6 @@ public class Main {
         var request = new ComparisonRequest(tableNames, source1, source2, tableSchemas, maxRows, threadPoolSize, fetchSize, queryTimeoutSeconds);
 
         var results = new TableComparator().compareAll(request);
-        new ConsoleReporter().report(results);
+        new ConsoleReporter().report(request, results);
     }
 }

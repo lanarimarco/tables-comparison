@@ -1,8 +1,11 @@
 package com.tablescomparison.reporter;
 
+import com.tablescomparison.model.ComparisonRequest;
 import com.tablescomparison.model.TableComparisonResult;
 
 import java.io.PrintStream;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 /** Prints a human-readable comparison report to a {@link PrintStream} (defaults to stdout). */
@@ -22,9 +25,12 @@ public class ConsoleReporter implements ComparisonReporter {
     }
 
     @Override
-    public void report(List<TableComparisonResult> results) {
+    public void report(ComparisonRequest request, List<TableComparisonResult> results) {
         out.println(HEADER);
         out.println("  TABLE COMPARISON REPORT");
+        out.println("  " + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+        out.println(SEPARATOR);
+        printConfig(request);
         out.println(HEADER);
 
         for (var result : results) {
@@ -73,5 +79,25 @@ public class ConsoleReporter implements ComparisonReporter {
         out.println("  Summary: %d table(s) — ✓ %d equal  ✗ %d different  ⚡ %d interrupted  ⚠ %d error(s)"
                 .formatted(results.size(), equal, diff, interrupted, errors));
         out.println(HEADER);
+    }
+
+    private void printConfig(ComparisonRequest req) {
+        var s1 = req.source1();
+        var s2 = req.source2();
+        out.println("  Source 1 : " + s1.name());
+        out.println("    URL    : " + s1.jdbcUrl());
+        out.println("    User   : " + s1.username());
+        if (s1.driverClassName() != null) out.println("    Driver : " + s1.driverClassName());
+        out.println("  Source 2 : " + s2.name());
+        out.println("    URL    : " + s2.jdbcUrl());
+        out.println("    User   : " + s2.username());
+        if (s2.driverClassName() != null) out.println("    Driver : " + s2.driverClassName());
+        out.println("  Tables   : " + String.join(", ", req.tables()));
+        if (!req.tableSchemas().isEmpty())
+            out.println("  Schemas  : " + String.join(", ", req.tableSchemas()));
+        out.println("  Max rows : " + (req.maxRows() == 0 ? "unlimited" : "%,d".formatted(req.maxRows())));
+        out.println("  Threads  : " + req.threadPoolSize());
+        out.println("  Fetch sz : " + req.fetchSize());
+        out.println("  Timeout  : " + (req.queryTimeoutSeconds() == 0 ? "none" : req.queryTimeoutSeconds() + "s"));
     }
 }
