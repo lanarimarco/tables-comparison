@@ -43,12 +43,17 @@ public class ConsoleReporter implements ComparisonReporter {
                     out.println("  Details:");
                     for (var d : diff.differences()) {
                         out.println("    [%-20s] %s".formatted(d.category(), d.description()));
+                        if (d.reproQuery() != null) {
+                            out.println("                           " + d.reproQuery());
+                        }
                     }
                 }
                 case TableComparisonResult.Interrupted i -> {
                     out.println("  Table  : " + i.tableName());
-                    out.println("  Status : ⚡ INTERRUPTED (scanned %,d/%,d rows)".formatted(i.rowsScanned(), i.totalRowCount()));
-                    out.println("  Select : " + i.rowQuery());
+                    out.println("  Status : ⚡ INTERRUPTED (compareMaxRows %,d/%,d rows)".formatted(i.compareMaxRows(), i.totalRowCount()));
+                    if (i.rowQuery() != null) {
+                        out.println("  Select : " + i.rowQuery());
+                    }
                 }
                 case TableComparisonResult.Error err -> {
                     out.println("  Table  : " + err.tableName());

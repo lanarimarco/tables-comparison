@@ -17,14 +17,14 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.stream.Collectors;
 
 /**
  * Compares tables between two datasources following a three-step strategy:
@@ -161,6 +161,11 @@ public class TableComparator {
 
             // Step 3 — row data
             log.info("[STEP 3/3] Comparing row data for table '{}'", tableName);
+            if (maxRows > 0 && count1 > maxRows) {
+                log.warn("Table '{}': skipping row scan — {} rows exceeds COMPARE_MAX_ROWS={}",
+                        tableName, count1, maxRows);
+                return new TableComparisonResult.Interrupted(tableName, maxRows, count1, null);
+            }
             var keyColumns = getUniqueIndexColumns(tableName, ds1, tableSchemas);
             log.debug("Table '{}': {} unique index column(s): {}", tableName, keyColumns.size(), keyColumns);
             var rowResult = compareRecords(tableName, ds1, ds2, keyColumns, cols1, name1, name2, count1, maxRows, fetchSize, queryTimeoutSeconds);
@@ -391,152 +396,250 @@ public class TableComparator {
             String name1, String name2, long totalCount, long maxRows, int fetchSize,
             int queryTimeoutSeconds) throws SQLException {
 
-        String orderBy = buildOrderBy(keyColumns, columns);
-        String query = "SELECT * FROM \"" + tableName.toUpperCase() + "\" ORDER BY " + orderBy;
+        String query = "SELECT * FROM \"" + tableName.toUpperCase() + "\"";
         log.debug("Executing query for table '{}': {}", tableName, query);
 
-        try (var conn1 = ds1.getConnection();
-             var conn2 = ds2.getConnection()) {
+        if (!keyColumns.isEmpty()) {
+            return compareByKey(tableName, ds1, ds2, keyColumns, columns, name1, name2,
+                    totalCount, maxRows, fetchSize, queryTimeoutSeconds, query);
+        }
+        return comparePositional(tableName, ds1, ds2, columns, name1, name2,
+                maxRows, fetchSize, queryTimeoutSeconds, query);
+    }
 
-            // PostgreSQL JDBC ignores setFetchSize when auto-commit is on because it cannot
-            // use a server-side cursor. Disabling it enables streaming row-by-row instead of
-            // materializing the full sorted result set on the server before sending anything.
-            conn1.setAutoCommit(false);
-            conn2.setAutoCommit(false);
+    private RowCompareResult compareByKey(
+            String tableName, DataSource ds1, DataSource ds2,
+            List<String> keyColumns, List<ColumnMetadata> columns,
+            String name1, String name2, long totalCount,
+            long maxRows, int fetchSize, int queryTimeoutSeconds, String query) throws SQLException {
 
-            try (var stmt1 = conn1.createStatement();
-                 var stmt2 = conn2.createStatement()) {
+        record Entry(List<Object> displayKey, List<Object> rowData) {}
+        var map1 = new LinkedHashMap<List<Object>, Entry>();
 
-                stmt1.setFetchSize(fetchSize);
-                stmt2.setFetchSize(fetchSize);
-                if (queryTimeoutSeconds > 0) {
-                    stmt1.setQueryTimeout(queryTimeoutSeconds);
-                    stmt2.setQueryTimeout(queryTimeoutSeconds);
-                }
-
-                try (var rs1 = stmt1.executeQuery(query);
-                     var rs2 = stmt2.executeQuery(query)) {
-
-                    boolean has1 = rs1.next();
-                    boolean has2 = rs2.next();
-                    long rowPosition = 0;
-                    long logStep = 1000L;
-
-                    while (has1 || has2) {
-                        rowPosition++;
-                        if (maxRows > 0 && rowPosition > maxRows) {
+        // PostgreSQL JDBC ignores setFetchSize when auto-commit is on because it cannot use a
+        // server-side cursor. Disabling it enables streaming instead of materializing everything.
+        try (var conn = ds1.getConnection()) {
+            conn.setAutoCommit(false);
+            try (var stmt = conn.createStatement()) {
+                stmt.setFetchSize(fetchSize);
+                if (queryTimeoutSeconds > 0) stmt.setQueryTimeout(queryTimeoutSeconds);
+                try (var rs = stmt.executeQuery(query)) {
+                    while (rs.next()) {
+                        if (maxRows > 0 && map1.size() >= maxRows) {
                             log.warn("Table '{}': row scan interrupted at {} rows (COMPARE_MAX_ROWS={})",
                                     tableName, maxRows, maxRows);
                             return RowCompareResult.interrupted(query);
                         }
-                        if (totalCount > 0 && rowPosition % logStep == 0) {
+                        map1.put(normalizedKeyTuple(rs, keyColumns),
+                                 new Entry(rawKeyTuple(rs, keyColumns), rowTuple(rs, columns)));
+                    }
+                }
+            }
+        }
+
+        long rowPosition = 0;
+        try (var conn = ds2.getConnection()) {
+            conn.setAutoCommit(false);
+            try (var stmt = conn.createStatement()) {
+                stmt.setFetchSize(fetchSize);
+                if (queryTimeoutSeconds > 0) stmt.setQueryTimeout(queryTimeoutSeconds);
+                try (var rs = stmt.executeQuery(query)) {
+                    while (rs.next()) {
+                        rowPosition++;
+                        if (totalCount > 0 && rowPosition % 1000 == 0) {
                             log.info("Table '{}': {}% ({}/{} rows)", tableName,
                                     rowPosition * 100 / totalCount, rowPosition, totalCount);
                         }
-                        if (!has1) {
+                        List<Object> normKey = normalizedKeyTuple(rs, keyColumns);
+                        List<Object> dispKey = rawKeyTuple(rs, keyColumns);
+                        List<Object> rowData2 = rowTuple(rs, columns);
+                        Entry entry1 = map1.remove(normKey);
+                        if (entry1 == null) {
                             return RowCompareResult.ok(query, List.of(new DifferenceDetail(
                                     DifferenceDetail.Category.ONLY_IN_SOURCE2,
-                                    "Row #%d — %s only".formatted(rowPosition, name2))));
-                        } else if (!has2) {
+                                    "Row — %s only (%s)".formatted(name2, formatKeyTuple(keyColumns, dispKey)))));
+                        }
+                        var mismatch = firstMismatch(entry1.rowData(), rowData2, columns, keyColumns);
+                        if (mismatch != null) {
                             return RowCompareResult.ok(query, List.of(new DifferenceDetail(
-                                    DifferenceDetail.Category.ONLY_IN_SOURCE1,
-                                    "Row #%d — %s only".formatted(rowPosition, name1))));
-                        } else if (!keyColumns.isEmpty()) {
-                            int cmp = compareKeyColumns(rs1, rs2, keyColumns);
-                            if (cmp < 0) {
-                                String keys = formatKeyValues(rs1, keyColumns);
-                                return RowCompareResult.ok(query, List.of(new DifferenceDetail(
-                                        DifferenceDetail.Category.ONLY_IN_SOURCE1,
-                                        "Row #%d — %s only (%s)".formatted(rowPosition, name1, keys))));
-                            } else if (cmp > 0) {
-                                String keys = formatKeyValues(rs2, keyColumns);
-                                return RowCompareResult.ok(query, List.of(new DifferenceDetail(
-                                        DifferenceDetail.Category.ONLY_IN_SOURCE2,
-                                        "Row #%d — %s only (%s)".formatted(rowPosition, name2, keys))));
-                            } else {
-                                String mismatch = firstMismatchField(rs1, rs2, columns, keyColumns);
-                                if (mismatch != null) {
-                                    return RowCompareResult.ok(query, List.of(new DifferenceDetail(
-                                            DifferenceDetail.Category.ROW_DATA_MISMATCH,
-                                            "Row #%d%s".formatted(rowPosition, mismatch))));
-                                }
-                                has1 = rs1.next();
-                                has2 = rs2.next();
-                            }
-                        } else {
-                            // No unique index — positional comparison
-                            String mismatch = firstMismatchField(rs1, rs2, columns, List.of());
-                            if (mismatch != null) {
-                                return RowCompareResult.ok(query, List.of(new DifferenceDetail(
-                                        DifferenceDetail.Category.ROW_DATA_MISMATCH,
-                                        "Row #%d%s".formatted(rowPosition, mismatch))));
-                            }
-                            has1 = rs1.next();
-                            has2 = rs2.next();
+                                    DifferenceDetail.Category.ROW_DATA_MISMATCH,
+                                    "Row (%s) — '%s': src1=%s, src2=%s".formatted(
+                                            formatKeyTuple(keyColumns, dispKey),
+                                            mismatch.columnName(), formatValue(mismatch.v1()), formatValue(mismatch.v2())),
+                                    buildReproQuery(tableName, mismatch.columnName(), keyColumns, dispKey))));
                         }
                     }
                 }
             }
         }
 
+        if (!map1.isEmpty()) {
+            var first = map1.values().iterator().next();
+            return RowCompareResult.ok(query, List.of(new DifferenceDetail(
+                    DifferenceDetail.Category.ONLY_IN_SOURCE1,
+                    "Row — %s only (%s)".formatted(name1, formatKeyTuple(keyColumns, first.displayKey())))));
+        }
+
         return RowCompareResult.ok(query, List.of());
     }
 
-    private String buildOrderBy(List<String> keyColumns, List<ColumnMetadata> columns) {
-        if (!keyColumns.isEmpty()) {
-            return keyColumns.stream()
-                    .map(col -> "\"" + col.toUpperCase() + "\"")
-                    .collect(Collectors.joining(", "));
-        }
-        return columns.stream()
-                .map(col -> "\"" + col.name().toUpperCase() + "\"")
-                .collect(Collectors.joining(", "));
-    }
+    private RowCompareResult comparePositional(
+            String tableName, DataSource ds1, DataSource ds2,
+            List<ColumnMetadata> columns, String name1, String name2,
+            long maxRows, int fetchSize, int queryTimeoutSeconds, String query) throws SQLException {
 
-    private String formatKeyValues(ResultSet rs, List<String> keyColumns) throws SQLException {
-        var sb = new StringBuilder("[");
-        for (int i = 0; i < keyColumns.size(); i++) {
-            if (i > 0) sb.append(", ");
-            Object val = rs.getObject(keyColumns.get(i));
-            sb.append(keyColumns.get(i)).append('=');
-            if (val instanceof String) {
-                sb.append('\'').append(val).append('\'');
-            } else {
-                sb.append(val);
+        var rows1 = loadAllRows(tableName, ds1, columns, maxRows, fetchSize, queryTimeoutSeconds, query);
+        if (rows1 == null) return RowCompareResult.interrupted(query);
+
+        var rows2 = loadAllRows(tableName, ds2, columns, maxRows, fetchSize, queryTimeoutSeconds, query);
+        if (rows2 == null) return RowCompareResult.interrupted(query);
+
+        rows1.sort(buildRowComparator(columns.size()));
+        rows2.sort(buildRowComparator(columns.size()));
+
+        int total = Math.max(rows1.size(), rows2.size());
+        for (int i = 0; i < total; i++) {
+            long pos = i + 1;
+            if (i >= rows1.size()) {
+                return RowCompareResult.ok(query, List.of(new DifferenceDetail(
+                        DifferenceDetail.Category.ONLY_IN_SOURCE2,
+                        "Row #%d — %s only".formatted(pos, name2))));
+            }
+            if (i >= rows2.size()) {
+                return RowCompareResult.ok(query, List.of(new DifferenceDetail(
+                        DifferenceDetail.Category.ONLY_IN_SOURCE1,
+                        "Row #%d — %s only".formatted(pos, name1))));
+            }
+            var mismatch = firstMismatch(rows1.get(i), rows2.get(i), columns, List.of());
+            if (mismatch != null) {
+                return RowCompareResult.ok(query, List.of(new DifferenceDetail(
+                        DifferenceDetail.Category.ROW_DATA_MISMATCH,
+                        "Row #%d — '%s': src1=%s, src2=%s".formatted(
+                                pos, mismatch.columnName(), formatValue(mismatch.v1()), formatValue(mismatch.v2())))));
             }
         }
-        sb.append(']');
-        return sb.toString();
+
+        return RowCompareResult.ok(query, List.of());
     }
 
-    private int compareKeyColumns(ResultSet rs1, ResultSet rs2, List<String> keyColumns)
-            throws SQLException {
-        for (String col : keyColumns) {
-            int cmp = compareValues(rs1.getObject(col), rs2.getObject(col));
-            if (cmp != 0) return cmp;
+    // Returns null when maxRows is exceeded (signals interruption to caller).
+    private List<List<Object>> loadAllRows(
+            String tableName, DataSource ds, List<ColumnMetadata> columns,
+            long maxRows, int fetchSize, int queryTimeoutSeconds, String query) throws SQLException {
+        var rows = new ArrayList<List<Object>>();
+        try (var conn = ds.getConnection()) {
+            conn.setAutoCommit(false);
+            try (var stmt = conn.createStatement()) {
+                stmt.setFetchSize(fetchSize);
+                if (queryTimeoutSeconds > 0) stmt.setQueryTimeout(queryTimeoutSeconds);
+                try (var rs = stmt.executeQuery(query)) {
+                    while (rs.next()) {
+                        if (maxRows > 0 && rows.size() >= maxRows) {
+                            log.warn("Table '{}': row scan interrupted at {} rows (COMPARE_MAX_ROWS={})",
+                                    tableName, maxRows, maxRows);
+                            return null;
+                        }
+                        rows.add(rowTuple(rs, columns));
+                    }
+                }
+            }
         }
-        return 0;
+        return rows;
     }
 
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
-    /**
-     * Returns a formatted string describing the first column that differs between the two rows,
-     * or {@code null} if all non-key columns are equal.
-     */
-    private String firstMismatchField(ResultSet rs1, ResultSet rs2,
-            List<ColumnMetadata> columns, List<String> keyColumns) throws SQLException {
+    private List<Object> normalizedKeyTuple(ResultSet rs, List<String> keyColumns) throws SQLException {
+        var key = new ArrayList<Object>(keyColumns.size());
+        for (String col : keyColumns) {
+            key.add(normalizeForKey(rs.getObject(col)));
+        }
+        return key;
+    }
+
+    private List<Object> rawKeyTuple(ResultSet rs, List<String> keyColumns) throws SQLException {
+        var key = new ArrayList<Object>(keyColumns.size());
+        for (String col : keyColumns) {
+            key.add(rs.getObject(col));
+        }
+        return key;
+    }
+
+    private List<Object> rowTuple(ResultSet rs, List<ColumnMetadata> columns) throws SQLException {
+        var row = new ArrayList<Object>(columns.size());
         for (var col : columns) {
+            row.add(rs.getObject(col.name()));
+        }
+        return row;
+    }
+
+    // Normalizes a value for use as a map key so that equivalent values from different JDBC
+    // drivers (e.g. Integer vs Long, BigDecimal("5.00") vs Integer(5)) compare as equal.
+    private Object normalizeForKey(Object v) {
+        if (v == null) return null;
+        if (v instanceof Number) {
+            try { return new BigDecimal(v.toString()).stripTrailingZeros().toPlainString(); }
+            catch (NumberFormatException ignored) {}
+        }
+        return v.toString();
+    }
+
+    private String formatValue(Object val) {
+        if (val instanceof String) return "'" + val + "'";
+        return String.valueOf(val);
+    }
+
+    private String formatKeyTuple(List<String> keyColumns, List<Object> keyValues) {
+        var sb = new StringBuilder("[");
+        for (int i = 0; i < keyColumns.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(keyColumns.get(i)).append('=').append(formatValue(keyValues.get(i)));
+        }
+        sb.append(']');
+        return sb.toString();
+    }
+
+    private record MismatchResult(String columnName, Object v1, Object v2) {}
+
+    private MismatchResult firstMismatch(List<Object> row1, List<Object> row2,
+            List<ColumnMetadata> columns, List<String> keyColumns) {
+        for (int i = 0; i < columns.size(); i++) {
+            var col = columns.get(i);
             if (keyColumns.contains(col.name())) continue;
-            Object v1 = rs1.getObject(col.name());
-            Object v2 = rs2.getObject(col.name());
-            if (!Objects.equals(v1, v2)) {
-                return " — '%s': src1=%s, src2=%s".formatted(col.name(), v1, v2);
+            Object v1 = row1.get(i);
+            Object v2 = row2.get(i);
+            if (compareValues(v1, v2) != 0) {
+                return new MismatchResult(col.name(), v1, v2);
             }
         }
         return null;
+    }
+
+    private String buildReproQuery(String tableName, String columnName,
+            List<String> keyColumns, List<Object> keyValues) {
+        var sb = new StringBuilder("SELECT \"").append(columnName)
+                .append("\" FROM \"").append(tableName.toUpperCase()).append('"');
+        if (!keyColumns.isEmpty()) {
+            sb.append(" WHERE ");
+            for (int i = 0; i < keyColumns.size(); i++) {
+                if (i > 0) sb.append(" AND ");
+                sb.append('"').append(keyColumns.get(i)).append('"')
+                  .append('=').append(formatValue(keyValues.get(i)));
+            }
+        }
+        return sb.toString();
+    }
+
+    private Comparator<List<Object>> buildRowComparator(int numCols) {
+        return (r1, r2) -> {
+            for (int i = 0; i < numCols; i++) {
+                int cmp = compareValues(r1.get(i), r2.get(i));
+                if (cmp != 0) return cmp;
+            }
+            return 0;
+        };
     }
 
     @SuppressWarnings("unchecked")

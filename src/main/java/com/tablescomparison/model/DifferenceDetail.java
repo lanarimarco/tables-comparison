@@ -5,8 +5,13 @@ package com.tablescomparison.model;
  *
  * @param category    the kind of difference
  * @param description human-readable explanation
+ * @param reproQuery  optional SQL to reproduce the difference in isolation (may be null)
  */
-public record DifferenceDetail(Category category, String description) {
+public record DifferenceDetail(Category category, String description, String reproQuery) {
+
+    public DifferenceDetail(Category category, String description) {
+        this(category, description, null);
+    }
 
     public enum Category {
         /** The total number of rows differs between the two sources. */

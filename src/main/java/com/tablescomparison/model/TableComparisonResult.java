@@ -34,8 +34,8 @@ public sealed interface TableComparisonResult
         }
     }
 
-    /** Row scan was stopped at COMPARE_MAX_ROWS; no difference found within the scanned rows. */
-    record Interrupted(String tableName, long rowsScanned, long totalRowCount, String rowQuery)
+    /** Row scan was skipped or stopped because the table exceeds COMPARE_MAX_ROWS. */
+    record Interrupted(String tableName, long compareMaxRows, long totalRowCount, String rowQuery)
             implements TableComparisonResult {}
 
     /** The comparison could not be completed due to an exception. */
