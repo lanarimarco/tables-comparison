@@ -25,6 +25,7 @@ import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Compares tables between two datasources following a three-step strategy:
@@ -415,67 +416,99 @@ public class TableComparator {
             long maxRows, int fetchSize, int queryTimeoutSeconds, String query) throws SQLException {
 
         record Entry(List<Object> displayKey, List<Object> rowData) {}
-        var map1 = new LinkedHashMap<List<Object>, Entry>();
+        var interrupted = new AtomicBoolean(false);
 
+        LinkedHashMap<List<Object>, Entry> map1;
+        LinkedHashMap<List<Object>, Entry> map2;
         // PostgreSQL JDBC ignores setFetchSize when auto-commit is on because it cannot use a
         // server-side cursor. Disabling it enables streaming instead of materializing everything.
-        try (var conn = ds1.getConnection()) {
-            conn.setAutoCommit(false);
-            try (var stmt = conn.createStatement()) {
-                stmt.setFetchSize(fetchSize);
-                if (queryTimeoutSeconds > 0) stmt.setQueryTimeout(queryTimeoutSeconds);
-                try (var rs = stmt.executeQuery(query)) {
-                    while (rs.next()) {
-                        if (maxRows > 0 && map1.size() >= maxRows) {
-                            log.warn("Table '{}': row scan interrupted at {} rows (COMPARE_MAX_ROWS={})",
-                                    tableName, maxRows, maxRows);
-                            return RowCompareResult.interrupted(query);
-                        }
-                        map1.put(normalizedKeyTuple(rs, keyColumns),
-                                 new Entry(rawKeyTuple(rs, keyColumns), rowTuple(rs, columns)));
-                        long fetched = map1.size();
-                        if (totalCount > 0 && fetched % 1000 == 0) {
-                            log.info("Table '{}' [src1]: fetched {} / {} rows ({}%) — heap: {} MB", tableName,
-                                    fetched, totalCount, fetched * 100 / totalCount, heapUsedMb());
+        var exec1 = Executors.newSingleThreadExecutor(r -> new Thread(r, "fetch-src1-" + tableName));
+        var exec2 = Executors.newSingleThreadExecutor(r -> new Thread(r, "fetch-src2-" + tableName));
+        try {
+            var future1 = exec1.submit(() -> {
+                var map = new LinkedHashMap<List<Object>, Entry>();
+                try (var conn = ds1.getConnection()) {
+                    conn.setAutoCommit(false);
+                    try (var stmt = conn.createStatement()) {
+                        stmt.setFetchSize(fetchSize);
+                        if (queryTimeoutSeconds > 0) stmt.setQueryTimeout(queryTimeoutSeconds);
+                        try (var rs = stmt.executeQuery(query)) {
+                            while (rs.next()) {
+                                if (maxRows > 0 && map.size() >= maxRows) {
+                                    log.warn("Table '{}': row scan interrupted at {} rows (COMPARE_MAX_ROWS={})",
+                                            tableName, maxRows, maxRows);
+                                    interrupted.set(true);
+                                    return map;
+                                }
+                                map.put(normalizedKeyTuple(rs, keyColumns),
+                                        new Entry(rawKeyTuple(rs, keyColumns), rowTuple(rs, columns)));
+                                long fetched = map.size();
+                                if (totalCount > 0 && fetched % 1000 == 0) {
+                                    log.info("Table '{}': fetched {} / {} rows ({}%) — heap: {} MB", tableName,
+                                            fetched, totalCount, fetched * 100 / totalCount, heapUsedMb());
+                                }
+                            }
                         }
                     }
                 }
+                return map;
+            });
+            var future2 = exec2.submit(() -> {
+                var map = new LinkedHashMap<List<Object>, Entry>();
+                try (var conn = ds2.getConnection()) {
+                    conn.setAutoCommit(false);
+                    try (var stmt = conn.createStatement()) {
+                        stmt.setFetchSize(fetchSize);
+                        if (queryTimeoutSeconds > 0) stmt.setQueryTimeout(queryTimeoutSeconds);
+                        try (var rs = stmt.executeQuery(query)) {
+                            while (rs.next()) {
+                                if (interrupted.get()) return map;
+                                map.put(normalizedKeyTuple(rs, keyColumns),
+                                        new Entry(rawKeyTuple(rs, keyColumns), rowTuple(rs, columns)));
+                                long fetched = map.size();
+                                if (totalCount > 0 && fetched % 1000 == 0) {
+                                    log.info("Table '{}': fetched {} / {} rows ({}%) — heap: {} MB", tableName,
+                                            fetched, totalCount, fetched * 100 / totalCount, heapUsedMb());
+                                }
+                            }
+                        }
+                    }
+                }
+                return map;
+            });
+            try {
+                map1 = future1.get();
+                map2 = future2.get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Row fetch interrupted", e);
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof SQLException sqle) throw sqle;
+                throw new RuntimeException("Row fetch failed", e.getCause());
             }
+        } finally {
+            exec1.shutdown();
+            exec2.shutdown();
         }
 
-        long rowPosition = 0;
-        try (var conn = ds2.getConnection()) {
-            conn.setAutoCommit(false);
-            try (var stmt = conn.createStatement()) {
-                stmt.setFetchSize(fetchSize);
-                if (queryTimeoutSeconds > 0) stmt.setQueryTimeout(queryTimeoutSeconds);
-                try (var rs = stmt.executeQuery(query)) {
-                    while (rs.next()) {
-                        rowPosition++;
-                        if (totalCount > 0 && rowPosition % 1000 == 0) {
-                            log.info("Table '{}' [src2]: fetched {} / {} rows ({}%) — heap: {} MB", tableName,
-                                    rowPosition, totalCount, rowPosition * 100 / totalCount, heapUsedMb());
-                        }
-                        List<Object> normKey = normalizedKeyTuple(rs, keyColumns);
-                        List<Object> dispKey = rawKeyTuple(rs, keyColumns);
-                        List<Object> rowData2 = rowTuple(rs, columns);
-                        Entry entry1 = map1.remove(normKey);
-                        if (entry1 == null) {
-                            return RowCompareResult.ok(query, List.of(new DifferenceDetail(
-                                    DifferenceDetail.Category.ONLY_IN_SOURCE2,
-                                    "Row — %s only (%s)".formatted(name2, formatKeyTuple(keyColumns, dispKey)))));
-                        }
-                        var mismatch = firstMismatch(entry1.rowData(), rowData2, columns, keyColumns);
-                        if (mismatch != null) {
-                            return RowCompareResult.ok(query, List.of(new DifferenceDetail(
-                                    DifferenceDetail.Category.ROW_DATA_MISMATCH,
-                                    "Row (%s) — '%s': src1=%s, src2=%s".formatted(
-                                            formatKeyTuple(keyColumns, dispKey),
-                                            mismatch.columnName(), formatValue(mismatch.v1()), formatValue(mismatch.v2())),
-                                    buildReproQuery(tableName, mismatch.columnName(), keyColumns, dispKey))));
-                        }
-                    }
-                }
+        if (interrupted.get()) return RowCompareResult.interrupted(query);
+
+        for (var e2 : map2.entrySet()) {
+            var entry1 = map1.remove(e2.getKey());
+            var entry2 = e2.getValue();
+            if (entry1 == null) {
+                return RowCompareResult.ok(query, List.of(new DifferenceDetail(
+                        DifferenceDetail.Category.ONLY_IN_SOURCE2,
+                        "Row — %s only (%s)".formatted(name2, formatKeyTuple(keyColumns, entry2.displayKey())))));
+            }
+            var mismatch = firstMismatch(entry1.rowData(), entry2.rowData(), columns, keyColumns);
+            if (mismatch != null) {
+                return RowCompareResult.ok(query, List.of(new DifferenceDetail(
+                        DifferenceDetail.Category.ROW_DATA_MISMATCH,
+                        "Row (%s) — '%s': src1=%s, src2=%s".formatted(
+                                formatKeyTuple(keyColumns, entry2.displayKey()),
+                                mismatch.columnName(), formatValue(mismatch.v1()), formatValue(mismatch.v2())),
+                        buildReproQuery(tableName, mismatch.columnName(), keyColumns, entry2.displayKey()))));
             }
         }
 
@@ -494,11 +527,30 @@ public class TableComparator {
             List<ColumnMetadata> columns, String name1, String name2,
             long totalCount, long maxRows, int fetchSize, int queryTimeoutSeconds, String query) throws SQLException {
 
-        var rows1 = loadAllRows(tableName, "src1", ds1, columns, totalCount, maxRows, fetchSize, queryTimeoutSeconds, query);
-        if (rows1 == null) return RowCompareResult.interrupted(query);
+        List<List<Object>> rows1, rows2;
+        var exec1 = Executors.newSingleThreadExecutor(r -> new Thread(r, "fetch-src1-" + tableName));
+        var exec2 = Executors.newSingleThreadExecutor(r -> new Thread(r, "fetch-src2-" + tableName));
+        try {
+            var future1 = exec1.submit(
+                    () -> loadAllRows(tableName, "src1", ds1, columns, totalCount, maxRows, fetchSize, queryTimeoutSeconds, query));
+            var future2 = exec2.submit(
+                    () -> loadAllRows(tableName, "src2", ds2, columns, totalCount, maxRows, fetchSize, queryTimeoutSeconds, query));
+            try {
+                rows1 = future1.get();
+                rows2 = future2.get();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Row fetch interrupted", e);
+            } catch (ExecutionException e) {
+                if (e.getCause() instanceof SQLException sqle) throw sqle;
+                throw new RuntimeException("Row fetch failed", e.getCause());
+            }
+        } finally {
+            exec1.shutdown();
+            exec2.shutdown();
+        }
 
-        var rows2 = loadAllRows(tableName, "src2", ds2, columns, totalCount, maxRows, fetchSize, queryTimeoutSeconds, query);
-        if (rows2 == null) return RowCompareResult.interrupted(query);
+        if (rows1 == null || rows2 == null) return RowCompareResult.interrupted(query);
 
         rows1.sort(buildRowComparator(columns.size()));
         rows2.sort(buildRowComparator(columns.size()));
@@ -548,7 +600,7 @@ public class TableComparator {
                         rows.add(rowTuple(rs, columns));
                         long fetched = rows.size();
                         if (totalCount > 0 && fetched % 1000 == 0) {
-                            log.info("Table '{}' [{}]: fetched {} / {} rows ({}%) — heap: {} MB", tableName, srcLabel,
+                            log.info("Table '{}': fetched {} / {} rows ({}%) — heap: {} MB", tableName,
                                     fetched, totalCount, fetched * 100 / totalCount, heapUsedMb());
                         }
                     }
