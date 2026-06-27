@@ -1,38 +1,58 @@
-# tables-comparison
+# ibmi-pg-probe
 
-A Java 21 / Maven utility that compares the content of database tables across two datasources and produces a human-readable report.
+A Java 21 / Maven toolkit for discovering and diagnosing migration issues from IBM i DB2 to PostgreSQL.
 
-## Features
+## Toolkits
+
+| Package | Entry point | Purpose |
+|---------|------------|---------|
+| `com.smeup.ibmipgprobe.migration` | `migration.Main` | Compare table contents across two datasources |
+| `com.smeup.ibmipgprobe.reload` | `reload.SetllIssueBenchmark` | Benchmark SETLL-equivalent query patterns (UNION vs UNION ALL vs row-value) |
+
+All toolkits share `SOURCE1_*` / `SOURCE2_*` datasource config from `.env`. Each toolkit uses its own prefix for additional settings (`COMPARE_*`, `SETLL_ISSUE_*`).
+
+---
+
+## Migration comparison toolkit
+
+### Features
 
 | Step | What is checked | Result on mismatch |
 |------|-----------------|--------------------|
 | 1 — Record count | Total rows in each table | Immediately flagged; steps 2 & 3 skipped |
 | 2 — Metadata | Column count, column names, JDBC types | Flagged; step 3 skipped |
-| 3 — Row data | Every row, ordered by primary key | Individual differences listed (max 100) |
+| 3 — Row data | Every row, ordered by primary key | Individual differences listed |
 
-## Requirements
+### Run
 
-- Java 21+
-- Maven 3.8+
+```bash
+mvn compile exec:java -Dexec.mainClass=com.smeup.ibmipgprobe.migration.Main
+```
 
-## Project structure
+### Project structure
 
 ```
-src/main/java/com/tablescomparison/
-├── Main.java                          # Entry point — loads config from .env
-├── model/
-│   ├── ConfigLoader.java              # Reads .env variables into config objects
-│   ├── DataSourceConfig.java          # Connection parameters for one datasource
-│   ├── ComparisonRequest.java         # List of tables + two DataSourceConfigs + optional schemas
-│   ├── ColumnMetadata.java            # Column descriptor (name, type, position…)
-│   ├── DifferenceDetail.java          # A single identified difference with a category
-│   └── TableComparisonResult.java     # Sealed interface: Equal | Different | Error
-├── comparator/
-│   └── TableComparator.java           # Core comparison logic
-└── reporter/
-    ├── ComparisonReporter.java        # Reporter interface
-    └── ConsoleReporter.java           # Prints a formatted report to stdout
+src/main/java/com/smeup/ibmipgprobe/
+├── DataSourceConfig.java              # Shared: connection parameters for one datasource
+├── SharedConfig.java                  # Shared: loads SOURCE1/SOURCE2 from .env
+├── migration/
+│   ├── Main.java                      # Entry point — loads config from .env
+│   ├── model/
+│   │   ├── ConfigLoader.java          # Reads COMPARE_* and TABLE_* from .env
+│   │   ├── ComparisonRequest.java     # List of tables + two DataSourceConfigs + options
+│   │   ├── ColumnMetadata.java        # Column descriptor (name, type, position…)
+│   │   ├── DifferenceDetail.java      # A single identified difference with a category
+│   │   └── TableComparisonResult.java # Sealed interface: Equal | Different | Interrupted | Error
+│   ├── comparator/
+│   │   └── TableComparator.java       # Core comparison logic
+│   └── reporter/
+│       ├── ComparisonReporter.java    # Reporter interface
+│       └── ConsoleReporter.java       # Prints a formatted report to stdout
+└── reload/
+    └── SetllIssueBenchmark.java       # SETLL-pattern JDBC benchmark
 ```
+
+---
 
 ## Quick start
 
@@ -47,70 +67,45 @@ cp .env.template .env
 Edit `.env`:
 
 ```env
-# Source 1
+# Shared datasource config
 SOURCE1_NAME=AS400 / ges_mu274
 SOURCE1_JDBC_URL=jdbc:as400://host;libraries=MYLIB;naming=system
 SOURCE1_USERNAME=user
 SOURCE1_PASSWORD=password
 SOURCE1_DRIVER_CLASS=com.ibm.as400.access.AS400JDBCDriver
 
-# Source 2
 SOURCE2_NAME=PG / bigdata
 SOURCE2_JDBC_URL=jdbc:postgresql://host:5432/mydb?currentSchema="MYSCHEMA"
 SOURCE2_USERNAME=user
 SOURCE2_PASSWORD=password
 SOURCE2_DRIVER_CLASS=org.postgresql.Driver
 
-# Table names (comma-separated)
+# Migration comparison toolkit
 TABLE_NAMES=TABLE1,TABLE2,TABLE3
-
-# Optional: schemas to try as fallback when metadata retrieval fails (comma-separated)
 TABLE_SCHEMAS=SCHEMA1,SCHEMA2
-
-# Optional: maximum rows to scan per table (0 or unset = no limit)
 COMPARE_MAX_ROWS=10000
+
+# Setll Issue Benchmark
+SETLL_ISSUE_ITERATIONS=5
 ```
 
-**Bundled JDBC drivers:** PostgreSQL (`postgresql 42.7.11`) and IBM AS400/iSeries (`jt400 10.4`) are already included as dependencies. For other databases, add the appropriate driver to `pom.xml`.
+**Bundled JDBC drivers:** PostgreSQL (`postgresql 42.7.11`) and IBM AS400/iSeries (`jt400 10.4`) are already included as dependencies.
 
-### 2. Run
+### 2. Run the migration comparison
 
 ```bash
-# requires Java 21+ on PATH / JAVA_HOME
-mvn compile exec:java -Dexec.mainClass=com.tablescomparison.Main
+mvn compile exec:java -Dexec.mainClass=com.smeup.ibmipgprobe.migration.Main
 ```
 
-### 3. Use programmatically
+### 3. Run the SETLL issue benchmark
 
-```java
-var source1 = new DataSourceConfig("Production", "jdbc:postgresql://...", "user", "password", null);
-var source2 = new DataSourceConfig("Staging",    "jdbc:postgresql://...", "user", "password", null);
-
-var request = new ComparisonRequest(
-    List.of("CUSTOMERS", "ORDERS", "PRODUCTS"),
-    source1,
-    source2,
-    List.of(),  // optional schema fallback list
-    0L          // maxRows: 0 means no limit
-);
-
-var results = new TableComparator().compareAll(request);
-new ConsoleReporter().report(results);
-
-// or inspect results directly
-for (TableComparisonResult result : results) {
-    switch (result) {
-        case TableComparisonResult.Equal eq ->
-            System.out.println(eq.tableName() + " is equal (" + eq.recordCount() + " rows)");
-        case TableComparisonResult.Different diff ->
-            diff.differences().forEach(d -> System.out.println(d.category() + ": " + d.description()));
-        case TableComparisonResult.Error err ->
-            System.err.println("Error on " + err.tableName() + ": " + err.message());
-    }
-}
+```bash
+mvn compile exec:java -Dexec.mainClass=com.smeup.ibmipgprobe.reload.SetllIssueBenchmark
 ```
 
-## Sample output
+---
+
+## Sample comparison output
 
 ```
 ================================================================
@@ -123,16 +118,10 @@ for (TableComparisonResult result : results) {
   Table  : ORDERS
   Status : ✗ DIFFERENT
   Details:
-    [RECORD_COUNT        ] Record count differs: Production=10000, Staging=9999
-----------------------------------------------------------------
-  Table  : PRODUCTS
-  Status : ✗ DIFFERENT
-  Details:
-    [ROW_DATA_MISMATCH   ] Row [ID=42] column 'PRICE': Production='9.99', Staging='10.99'
-    [ONLY_IN_SOURCE1     ] Production only — {ID=99, NAME=Widget, PRICE=5.00}
+    [RECORD_COUNT        ] Record count differs: AS400=10000, PG=9999
 ----------------------------------------------------------------
 
-  Summary: 3 table(s) — ✓ 1 equal  ✗ 2 different  ⚠ 0 error(s)
+  Summary: 2 table(s) — ✓ 1 equal  ✗ 1 different  ⚡ 0 interrupted  ⚠ 0 error(s)
 ================================================================
 ```
 
@@ -147,6 +136,11 @@ for (TableComparisonResult result : results) {
 | `ONLY_IN_SOURCE1` | Row exists only in source 1 (identified by PK) |
 | `ONLY_IN_SOURCE2` | Row exists only in source 2 (identified by PK) |
 | `ROW_DATA_MISMATCH` | Same PK, but one or more column values differ |
+
+## Requirements
+
+- Java 21+
+- Maven 3.8+
 
 ## Running tests
 

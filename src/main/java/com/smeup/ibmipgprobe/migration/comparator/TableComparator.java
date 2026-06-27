@@ -1,10 +1,10 @@
-package com.tablescomparison.comparator;
+package com.smeup.ibmipgprobe.migration.comparator;
 
-import com.tablescomparison.model.ColumnMetadata;
-import com.tablescomparison.model.ComparisonRequest;
-import com.tablescomparison.model.DataSourceConfig;
-import com.tablescomparison.model.DifferenceDetail;
-import com.tablescomparison.model.TableComparisonResult;
+import com.smeup.ibmipgprobe.DataSourceConfig;
+import com.smeup.ibmipgprobe.migration.model.ColumnMetadata;
+import com.smeup.ibmipgprobe.migration.model.ComparisonRequest;
+import com.smeup.ibmipgprobe.migration.model.DifferenceDetail;
+import com.smeup.ibmipgprobe.migration.model.TableComparisonResult;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.slf4j.Logger;

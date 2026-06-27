@@ -1,4 +1,4 @@
-package com.tablescomparison.model;
+package com.smeup.ibmipgprobe.migration.model;
 
 /**
  * Metadata for a single database column, obtained from {@link java.sql.DatabaseMetaData#getColumns}.

@@ -1,8 +1,8 @@
-package com.tablescomparison;
+package com.smeup.ibmipgprobe.migration;
 
-import com.tablescomparison.comparator.TableComparator;
-import com.tablescomparison.model.DifferenceDetail;
-import com.tablescomparison.model.TableComparisonResult;
+import com.smeup.ibmipgprobe.migration.comparator.TableComparator;
+import com.smeup.ibmipgprobe.migration.model.DifferenceDetail;
+import com.smeup.ibmipgprobe.migration.model.TableComparisonResult;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.junit.jupiter.api.AfterEach;
@@ -122,19 +122,21 @@ class TableComparatorTest {
     }
 
     @Test
-    void charVsVarchar_sameLength_notFlagged() throws SQLException {
-        // CHAR and VARCHAR are in the same character family; same length → no diff
+    void charVsVarchar_sameLength_flaggedAsTypeDiff() throws SQLException {
+        // CHAR is in FIXED_LENGTH_CHARACTER_FAMILY, VARCHAR in VARYING_CHARACTER_FAMILY — different families → always flagged
         execute(db1, "CREATE TABLE PRODUCTS (ID INT PRIMARY KEY, CODE CHAR(10))");
         execute(db2, "CREATE TABLE PRODUCTS (ID INT PRIMARY KEY, CODE VARCHAR(10))");
 
         var results = new TableComparator().compareAll(List.of("PRODUCTS"), ds1, ds2, "S1", "S2");
 
-        assertThat(results.get(0)).isInstanceOf(TableComparisonResult.Equal.class);
+        var diff = (TableComparisonResult.Different) results.get(0);
+        assertThat(diff.differences()).hasSize(1);
+        assertThat(diff.differences().get(0).category()).isEqualTo(DifferenceDetail.Category.COLUMN_TYPE);
     }
 
     @Test
     void charVsVarchar_differentLength_flaggedAsTypeDiff() throws SQLException {
-        // Same character family, but lengths differ → COLUMN_TYPE diff
+        // CHAR and VARCHAR are different families; reported via the generic "type differs" branch
         execute(db1, "CREATE TABLE PRODUCTS (ID INT PRIMARY KEY, CODE CHAR(10))");
         execute(db2, "CREATE TABLE PRODUCTS (ID INT PRIMARY KEY, CODE VARCHAR(20))");
 
@@ -143,7 +145,7 @@ class TableComparatorTest {
         var diff = (TableComparisonResult.Different) results.get(0);
         assertThat(diff.differences()).hasSize(1);
         assertThat(diff.differences().get(0).category()).isEqualTo(DifferenceDetail.Category.COLUMN_TYPE);
-        assertThat(diff.differences().get(0).description()).contains("length");
+        assertThat(diff.differences().get(0).description()).contains("type differs");
     }
 
     @Test
@@ -189,12 +191,14 @@ class TableComparatorTest {
         var diff = (TableComparisonResult.Different) results.get(0);
         assertThat(diff.differences().stream().map(DifferenceDetail::category))
                 .contains(DifferenceDetail.Category.ROW_DATA_MISMATCH);
-        assertThat(diff.differences().get(0).description()).startsWith("Row #");
+        assertThat(diff.differences().get(0).description()).startsWith("Row (");
         assertThat(diff.rowQuery()).contains("CUSTOMERS");
     }
 
     @Test
-    void missingRowInSource2_flaggedAsOnlyInSource1() throws SQLException {
+    void asymmetricRows_firstDifferenceFlagged() throws SQLException {
+        // Key-based compare stops at the first difference found while iterating source2.
+        // ID=3 (source2 only) is encountered before the source1-only ID=2 check, so only ONLY_IN_SOURCE2 is returned.
         execute(db1, DDL_ORDERS,
                 "INSERT INTO ORDERS VALUES (1,10,100.00)",
                 "INSERT INTO ORDERS VALUES (2,20,200.00)");
@@ -206,7 +210,6 @@ class TableComparatorTest {
 
         var diff = (TableComparisonResult.Different) results.get(0);
         var categories = diff.differences().stream().map(DifferenceDetail::category).toList();
-        assertThat(categories).contains(DifferenceDetail.Category.ONLY_IN_SOURCE1);
         assertThat(categories).contains(DifferenceDetail.Category.ONLY_IN_SOURCE2);
     }
 

@@ -1,13 +1,10 @@
-package com.tablescomparison;
+package com.smeup.ibmipgprobe.migration;
 
-import com.tablescomparison.comparator.TableComparator;
-import com.tablescomparison.model.ComparisonRequest;
-import com.tablescomparison.model.ConfigLoader;
-import com.tablescomparison.reporter.ConsoleReporter;
+import com.smeup.ibmipgprobe.migration.comparator.TableComparator;
+import com.smeup.ibmipgprobe.migration.model.ComparisonRequest;
+import com.smeup.ibmipgprobe.migration.model.ConfigLoader;
+import com.smeup.ibmipgprobe.migration.reporter.ConsoleReporter;
 
-/**
- * Entry point — datasource configurations and table names are loaded from .env file.
- */
 public class Main {
 
     public static void main(String[] args) {

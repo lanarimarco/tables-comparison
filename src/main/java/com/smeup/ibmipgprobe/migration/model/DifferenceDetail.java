@@ -1,4 +1,4 @@
-package com.tablescomparison.model;
+package com.smeup.ibmipgprobe.migration.model;
 
 /**
  * A single identified difference between the two datasources for a given table.

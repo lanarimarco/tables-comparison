@@ -1,9 +1,9 @@
-package com.tablescomparison.model;
+package com.smeup.ibmipgprobe;
 
 /**
  * Connection configuration for a single datasource.
  *
- * @param name            human-readable label used in comparison output (e.g. "Production")
+ * @param name            human-readable label used in output (e.g. "AS400 / ges_mu274")
  * @param jdbcUrl         JDBC URL (e.g. "jdbc:postgresql://host:5432/mydb")
  * @param username        database username
  * @param password        database password

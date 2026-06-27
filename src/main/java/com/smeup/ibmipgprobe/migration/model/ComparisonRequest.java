@@ -1,4 +1,6 @@
-package com.tablescomparison.model;
+package com.smeup.ibmipgprobe.migration.model;
+
+import com.smeup.ibmipgprobe.DataSourceConfig;
 
 import java.util.List;
 

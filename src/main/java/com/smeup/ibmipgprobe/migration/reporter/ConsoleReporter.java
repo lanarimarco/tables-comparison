@@ -1,7 +1,7 @@
-package com.tablescomparison.reporter;
+package com.smeup.ibmipgprobe.migration.reporter;
 
-import com.tablescomparison.model.ComparisonRequest;
-import com.tablescomparison.model.TableComparisonResult;
+import com.smeup.ibmipgprobe.migration.model.ComparisonRequest;
+import com.smeup.ibmipgprobe.migration.model.TableComparisonResult;
 
 import java.io.PrintStream;
 import java.time.LocalDateTime;
